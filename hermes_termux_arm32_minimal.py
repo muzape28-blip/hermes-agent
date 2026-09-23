@@ -1081,18 +1081,37 @@ def _palette_lines(buffer: str, selected: int, *, width: int | None = None) -> l
     return lines
 
 
-def _read_escape_tail(select_mod: Any) -> str:
-    tail = ""
-    # Termux arrow keys normally arrive as ESC [ A/B/C/D. Read the short tail
-    # without blocking a real Esc key for long.
-    while len(tail) < 5:
-        ready, _w, _x = select_mod.select([sys.stdin], [], [], 0.015)
+def _read_escape_tail(select_mod: Any, *, first: str = "") -> str:
+    tail = first
+    # Termux's extra-key row can deliver ESC and the trailing "[B" with a
+    # noticeable Android/input-method delay. Keep this long enough that arrows
+    # do not leak as literal "[A"/"[B", while Esc alone still cancels quickly.
+    deadline = time.monotonic() + 0.25
+    while len(tail) < 8:
+        timeout = max(0.0, deadline - time.monotonic())
+        if timeout <= 0:
+            break
+        ready, _w, _x = select_mod.select([sys.stdin], [], [], timeout)
         if not ready:
             break
         tail += sys.stdin.read(1)
         if tail in {"[A", "[B", "[C", "[D", "OA", "OB", "OC", "OD"}:
             break
+        if tail.startswith("[") and tail[-1:].isalpha():
+            break
     return tail
+
+
+def _escape_action(tail: str) -> str:
+    if tail in {"[A", "OA"} or tail.endswith("A"):
+        return "up"
+    if tail in {"[B", "OB"} or tail.endswith("B"):
+        return "down"
+    if tail in {"[C", "OC"} or tail.endswith("C"):
+        return "right"
+    if tail in {"[D", "OD"} or tail.endswith("D"):
+        return "left"
+    return ""
 
 
 def _redraw_tui_input(prefix: str, buffer: str, selected: int, rendered_lines: int) -> int:
@@ -1168,22 +1187,50 @@ def _read_tui_input(cfg: RuntimeConfig) -> str:
                 buffer = ""
                 selected = 0
             elif ch == "\x1b":
-                tail = _read_escape_tail(select_mod)
-                if tail in {"[A", "OA"}:
+                action = _escape_action(_read_escape_tail(select_mod))
+                if action == "up":
                     if _palette_candidates(buffer):
                         selected -= 1
-                elif tail in {"[B", "OB"}:
+                elif action == "down":
                     if _palette_candidates(buffer):
                         selected += 1
-                elif tail in {"[C", "OC"}:
+                elif action == "right":
                     if _palette_entry(buffer, selected) is not None:
                         buffer = _palette_apply(buffer, selected, append_space=True)
                         selected = 0
-                elif not tail:
-                    if _palette_active(buffer):
-                        buffer = ""
-                        selected = 0
+                elif _palette_active(buffer):
+                    buffer = ""
+                    selected = 0
                 # Left arrow and unknown escape sequences are ignored.
+            elif ch == "\x9b":  # 8-bit CSI, used by some terminals/input methods
+                action = _escape_action("[" + _read_escape_tail(select_mod))
+                if action == "up" and _palette_candidates(buffer):
+                    selected -= 1
+                elif action == "down" and _palette_candidates(buffer):
+                    selected += 1
+                elif action == "right" and _palette_entry(buffer, selected) is not None:
+                    buffer = _palette_apply(buffer, selected, append_space=True)
+                    selected = 0
+            elif ch == "[":
+                # Defensive recovery for Termux/input-methods that deliver the ESC
+                # byte separately/late: do not leak literal [A/[B into the prompt.
+                tail = _read_escape_tail(select_mod, first="[")
+                action = _escape_action(tail)
+                if action == "up":
+                    if _palette_candidates(buffer):
+                        selected -= 1
+                elif action == "down":
+                    if _palette_candidates(buffer):
+                        selected += 1
+                elif action == "right":
+                    if _palette_entry(buffer, selected) is not None:
+                        buffer = _palette_apply(buffer, selected, append_space=True)
+                        selected = 0
+                elif action:
+                    pass
+                else:
+                    buffer += tail
+                    selected = 0
             elif ch == "\t":
                 if _palette_entry(buffer, selected) is not None:
                     buffer = _palette_apply(buffer, selected, append_space=True)

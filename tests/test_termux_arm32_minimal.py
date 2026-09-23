@@ -350,6 +350,14 @@ def test_slash_palette_space_select_adds_argument_space_only_when_needed():
     assert any("Space pilih" in line for line in lines)
 
 
+def test_escape_action_handles_termux_arrow_sequences():
+    assert minimal._escape_action("[A") == "up"
+    assert minimal._escape_action("[B") == "down"
+    assert minimal._escape_action("OC") == "right"
+    assert minimal._escape_action("[D") == "left"
+    assert minimal._escape_action("[Z") == ""
+
+
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     for key in ("HERMES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
