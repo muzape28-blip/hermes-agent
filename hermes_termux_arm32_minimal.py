@@ -535,14 +535,62 @@ def _default_model(provider: str, base_url: str) -> str:
     return DEFAULT_OPENAI_MODEL
 
 
-def _api_key_for_provider(provider: str, args_key: str | None = None) -> str:
+def _auth_json_api_key_for_provider(provider: str) -> str:
+    """Best-effort read-only API-key lookup from ~/.hermes/auth.json.
+
+    Full Hermes stores `hermes auth add` keys in auth.json/credential_pool.
+    Reading that JSON directly keeps this ARM32 path stdlib-only while allowing
+    users who copy/sync Hermes credentials to reuse provider-specific API keys.
+    """
+    path = _hermes_home() / "auth.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+
+    pool = data.get("credential_pool")
+    entries = pool.get(provider) if isinstance(pool, dict) else None
+    if isinstance(entries, list):
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("last_status") or "").lower() == "dead":
+                continue
+            token = str(entry.get("access_token") or entry.get("api_key") or "").strip()
+            if token:
+                return token
+
+    providers = data.get("providers")
+    state = providers.get(provider) if isinstance(providers, dict) else None
+    if isinstance(state, dict):
+        for key in ("api_key", "access_token", "agent_key"):
+            token = str(state.get(key) or "").strip()
+            if token:
+                return token
+    return ""
+
+
+def _provider_specific_api_key(provider: str, args_key: str | None = None) -> str:
     if args_key:
         return args_key
     preset = MINIMAL_PROVIDERS.get(provider)
-    names = list(preset.env_vars if preset else ()) + ["HERMES_API_KEY"]
-    # Compatibility: previous minimal runtime accepted OPENAI_API_KEY and OPENROUTER_API_KEY globally.
-    names.extend(["OPENAI_API_KEY", "OPENROUTER_API_KEY"])
-    return _env_first(*dict.fromkeys(names))
+    return _env_first(*(preset.env_vars if preset else ())) or _auth_json_api_key_for_provider(provider)
+
+
+def _generic_api_key() -> str:
+    # Compatibility: previous minimal runtime accepted these globally. They are
+    # intentionally not treated as provider-specific in the TUI picker because an
+    # OpenRouter key does not make OpenCode, DeepSeek, etc. authenticated.
+    return _env_first("HERMES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY")
+
+
+def _api_key_for_provider(provider: str, args_key: str | None = None, *, allow_generic: bool = True) -> str:
+    specific = _provider_specific_api_key(provider, args_key)
+    if specific:
+        return specific
+    return _generic_api_key() if allow_generic else ""
 
 
 def _runtime_config(args: argparse.Namespace, *, require_key: bool = True) -> RuntimeConfig:
@@ -995,10 +1043,12 @@ def _print_help() -> None:
 
 def _provider_key_state(provider_id: str, current_key: str = "") -> str:
     if current_key:
-        return "set"
+        return "session"
     preset = MINIMAL_PROVIDERS[provider_id]
-    if _api_key_for_provider(provider_id):
+    if _provider_specific_api_key(provider_id):
         return "set"
+    if _generic_api_key():
+        return "generic"
     return "optional" if preset.allow_no_key else "missing"
 
 
@@ -1124,7 +1174,7 @@ def _terms_want_all(terms: list[str]) -> bool:
 def _switch_provider(cfg: RuntimeConfig, provider_name: str) -> RuntimeConfig:
     provider_id = _provider_id(provider_name)
     preset = MINIMAL_PROVIDERS[provider_id]
-    api_key = _api_key_for_provider(provider_id)
+    api_key = _api_key_for_provider(provider_id, allow_generic=False)
     return RuntimeConfig(
         api_key=api_key,
         base_url=preset.base_url,
@@ -1225,6 +1275,50 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+
+MODEL_LIST_WORDS = {"offline", "--offline", "curated", "--curated", "free", "--free", "all", "--all"}
+MODEL_ROW_TRAIL_WORDS = {"chat", "responses", "messages", "live", "curated"}
+
+
+def _looks_like_model_list_request(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    if any(token.lower() in MODEL_LIST_WORDS for token in tokens):
+        return True
+    try:
+        return bool(_provider_id(tokens[0]))
+    except SystemExit:
+        return False
+
+
+def _model_choice_from_last(tokens: list[str], last_models: list[ModelEntry], last_model_provider: str) -> tuple[str, str] | None:
+    if not tokens:
+        return None
+    first = tokens[0]
+    if first.isdigit():
+        if not last_models:
+            raise SystemExit("run /models first, then choose a number; or paste the full model id")
+        idx = int(first) - 1
+        if idx < 0 or idx >= len(last_models):
+            raise SystemExit(f"model number out of range: {first}")
+        return last_models[idx].id, last_model_provider
+    for entry in last_models:
+        if entry.id == first:
+            # Common phone paste: `/models <id> responses live` after copying a row.
+            # Treat metadata-looking trailing columns as a selection instead of a search.
+            if len(tokens) == 1 or all(token.lower() in MODEL_ROW_TRAIL_WORDS for token in tokens[1:]):
+                return entry.id, last_model_provider
+            break
+    return None
+
+
+def _apply_model_choice(cfg: RuntimeConfig, model_id: str, provider_id: str) -> RuntimeConfig:
+    if provider_id and provider_id != cfg.provider:
+        cfg = _switch_provider(cfg, provider_id)
+    cfg = replace(cfg, model=model_id)
+    _print_notice(f"model set: {cfg.model} ({_mode_label(_api_mode_for(cfg.provider, cfg.model))})")
+    return cfg
+
 def _handle_models_command(
     cfg: RuntimeConfig,
     rest: list[str],
@@ -1254,6 +1348,15 @@ def cmd_tui(args: argparse.Namespace) -> int:
             print("\nbye.")
             return 0
         if not raw:
+            continue
+        if raw.isdigit() and last_models:
+            try:
+                choice = _model_choice_from_last([raw], last_models, last_model_provider)
+                if choice is None:
+                    raise SystemExit(f"model number out of range: {raw}")
+                cfg = _apply_model_choice(cfg, *choice)
+            except SystemExit as exc:
+                _print_error(str(exc))
             continue
         if raw.startswith("/") or raw == "?":
             command_line = "help" if raw == "?" else raw[1:]
@@ -1308,27 +1411,22 @@ def cmd_tui(args: argparse.Namespace) -> int:
                     cfg = replace(cfg, api_key=key)
                     _print_notice("api key set for this session")
                 elif cmd == "models":
-                    last_models, last_model_provider = _handle_models_command(cfg, rest, last_model_provider=last_model_provider)
+                    choice = _model_choice_from_last(rest, last_models, last_model_provider) if rest else None
+                    if choice is not None:
+                        cfg = _apply_model_choice(cfg, *choice)
+                    else:
+                        last_models, last_model_provider = _handle_models_command(cfg, rest, last_model_provider=last_model_provider)
                 elif cmd == "model":
                     if not rest:
                         _print_notice(f"current model: {cfg.model}")
+                    elif _looks_like_model_list_request(rest):
+                        _print_notice("interpreting `/model ...` as `/models ...`; choose with /model <number> after the list")
+                        last_models, last_model_provider = _handle_models_command(cfg, rest, last_model_provider=last_model_provider)
                     else:
-                        chosen = rest[0]
-                        provider_for_choice = cfg.provider
-                        if chosen.isdigit():
-                            if not last_models:
-                                _print_error("run /models first, then choose a number; or paste the full model id")
-                                continue
-                            idx = int(chosen) - 1
-                            if idx < 0 or idx >= len(last_models):
-                                _print_error(f"model number out of range: {chosen}")
-                                continue
-                            chosen = last_models[idx].id
-                            provider_for_choice = last_model_provider
-                        if provider_for_choice != cfg.provider:
-                            cfg = _switch_provider(cfg, provider_for_choice)
-                        cfg = replace(cfg, model=chosen)
-                        _print_notice(f"model set: {cfg.model} ({_mode_label(_api_mode_for(cfg.provider, cfg.model))})")
+                        choice = _model_choice_from_last(rest, last_models, last_model_provider)
+                        if choice is None:
+                            choice = (rest[0], cfg.provider)
+                        cfg = _apply_model_choice(cfg, *choice)
                 elif cmd == "clear":
                     messages.clear()
                     transcript.clear()

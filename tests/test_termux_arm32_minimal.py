@@ -284,6 +284,56 @@ def test_models_terms_can_choose_provider_and_search(capsys):
     assert "claude-sonnet-5" not in out
 
 
+def test_switching_provider_does_not_reuse_openrouter_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
+    cfg = minimal.RuntimeConfig(
+        api_key="or-key",
+        base_url="https://openrouter.ai/api/v1",
+        model="openai/gpt-4o-mini",
+        timeout=60,
+        provider="openrouter",
+    )
+
+    switched = minimal._switch_provider(cfg, "opencode-zen")
+
+    assert switched.provider == "opencode-zen"
+    assert switched.api_key == ""
+    assert minimal._provider_key_state("opencode-zen") == "generic"
+
+
+def test_provider_key_can_be_read_from_auth_json_pool(monkeypatch, tmp_path):
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "auth.json").write_text(
+        json.dumps({"credential_pool": {"opencode-zen": [{"access_token": "zen-key", "auth_type": "api_key"}]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.delenv("OPENCODE_ZEN_API_KEY", raising=False)
+
+    cfg = minimal.RuntimeConfig("", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini", 60, "openrouter")
+    switched = minimal._switch_provider(cfg, "opencode-zen")
+
+    assert switched.api_key == "zen-key"
+    assert minimal._provider_key_state("opencode-zen") == "set"
+
+
+def test_model_choice_accepts_copied_model_row_metadata():
+    entries = [minimal.ModelEntry("muse-spark-1.3-contributor-free", minimal.API_CODEX_RESPONSES, "live")]
+
+    assert minimal._model_choice_from_last(
+        ["muse-spark-1.3-contributor-free", "responses", "live"], entries, "opencode-zen"
+    ) == ("muse-spark-1.3-contributor-free", "opencode-zen")
+
+
+def test_model_command_options_are_treated_as_model_listing_request():
+    assert minimal._looks_like_model_list_request(["offline", "all"]) is True
+    assert minimal._looks_like_model_list_request(["opencode-zen", "kimi"]) is True
+    assert minimal._looks_like_model_list_request(["muse-spark-1.3-contributor-free"]) is False
+
+
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     for key in ("HERMES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
