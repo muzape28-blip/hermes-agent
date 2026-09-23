@@ -2214,9 +2214,23 @@ exec "$minimal_python" "$minimal_entry" "\$@"
 EOF
     chmod +x "$command_link_dir/hermes-arm32"
     ln -s "hermes-arm32" "$command_link_dir/hermes-termux-arm32" 2>/dev/null || true
+    rm -f "$command_link_dir/hermes"
+    cat > "$command_link_dir/hermes" <<EOF
+#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+if [ "\$#" -eq 0 ]; then
+    exec "$command_link_dir/hermes-arm32" tui
+fi
+echo "Hermes full CLI is disabled in Termux ARM32 minimal mode; routing to hermes-arm32." >&2
+exec "$command_link_dir/hermes-arm32" "\$@"
+EOF
+    chmod +x "$command_link_dir/hermes"
     export PATH="$command_link_dir:$PATH"
     log_success "Installed hermes-arm32 launcher → $command_link_display_dir/hermes-arm32"
+    log_success "Installed minimal hermes shim → $command_link_display_dir/hermes"
     log_info "Try: hermes-arm32 doctor"
+    log_info "TUI: hermes-arm32 tui  (or just: hermes)"
     log_info "Chat: HERMES_API_KEY=... HERMES_BASE_URL=https://openrouter.ai/api/v1 HERMES_MODEL=... hermes-arm32 chat 'Halo'"
 }
 
@@ -2225,8 +2239,12 @@ print_termux_arm32_minimal_success() {
     echo -e "${GREEN}${BOLD}✓ Hermes Termux ARM32 minimal runtime installed${NC}"
     echo ""
     echo "What works now:"
+    echo "  • hermes            # launches Hermes Pocket TUI"
+    echo "  • hermes-arm32 tui"
     echo "  • hermes-arm32 --version"
     echo "  • hermes-arm32 doctor"
+    echo "  • hermes-arm32 providers"
+    echo "  • hermes-arm32 models --provider openrouter --free"
     echo "  • hermes-arm32 chat '<prompt>' against an OpenAI-compatible HTTP API"
     echo ""
     echo "Still intentionally disabled on ARM32 minimal: dashboard, vision/HEIF,"

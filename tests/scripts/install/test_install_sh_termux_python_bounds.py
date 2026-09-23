@@ -375,4 +375,6 @@ def test_setup_script_arm32_minimal_installs_launcher(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stdout
     assert "using the stdlib-only minimal runtime" in result.stdout
     assert "Installed hermes-arm32" in result.stdout
-    assert (tmp_path / "com.termux" / "files" / "usr" / "bin" / "hermes-arm32").exists()
+    termux_bin = tmp_path / "com.termux" / "files" / "usr" / "bin"
+    assert (termux_bin / "hermes-arm32").exists()
+    assert (termux_bin / "hermes").exists()

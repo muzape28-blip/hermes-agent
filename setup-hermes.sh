@@ -245,10 +245,25 @@ exec "$SETUP_PYTHON" "$SCRIPT_DIR/hermes_termux_arm32_minimal.py" "\$@"
 EOF
     chmod +x "$COMMAND_LINK_DIR/hermes-arm32"
     ln -s "hermes-arm32" "$COMMAND_LINK_DIR/hermes-termux-arm32" 2>/dev/null || true
+    rm -f "$COMMAND_LINK_DIR/hermes"
+    cat > "$COMMAND_LINK_DIR/hermes" <<EOF
+#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+if [ "\$#" -eq 0 ]; then
+    exec "$COMMAND_LINK_DIR/hermes-arm32" tui
+fi
+echo "Hermes full CLI is disabled in Termux ARM32 minimal mode; routing to hermes-arm32." >&2
+exec "$COMMAND_LINK_DIR/hermes-arm32" "\$@"
+EOF
+    chmod +x "$COMMAND_LINK_DIR/hermes"
     export PATH="$COMMAND_LINK_DIR:$PATH"
     echo -e "${GREEN}✓${NC} Installed hermes-arm32 → $COMMAND_LINK_DISPLAY_DIR/hermes-arm32"
+    echo -e "${GREEN}✓${NC} Installed minimal hermes shim → $COMMAND_LINK_DISPLAY_DIR/hermes"
     echo ""
     echo "Try: hermes-arm32 doctor"
+    echo "TUI: hermes-arm32 tui  (or just: hermes)"
+    echo "Models: hermes-arm32 models --provider openrouter --free"
     echo "Chat: HERMES_API_KEY=... HERMES_BASE_URL=https://openrouter.ai/api/v1 HERMES_MODEL=... hermes-arm32 chat 'Halo'"
     echo ""
     echo "Disabled on ARM32 minimal: dashboard, vision/HEIF, heavy document extraction, voice/STT, wake-word."
