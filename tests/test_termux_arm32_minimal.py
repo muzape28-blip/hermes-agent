@@ -334,6 +334,22 @@ def test_model_command_options_are_treated_as_model_listing_request():
     assert minimal._looks_like_model_list_request(["muse-spark-1.3-contributor-free"]) is False
 
 
+def test_slash_palette_filters_exact_commands_before_prefixes():
+    assert [entry.command for entry in minimal._palette_candidates("/mo")][:2] == ["/models", "/model"]
+    assert minimal._palette_apply("/model", 0) == "/model"
+    assert minimal._palette_apply("/models", 0) == "/models"
+    assert minimal._palette_apply("/provider", 0) == "/provider"
+    assert minimal._palette_candidates("/models ") == []
+
+
+def test_slash_palette_space_select_adds_argument_space_only_when_needed():
+    assert minimal._palette_apply("/model", 0, append_space=True) == "/model "
+    assert minimal._palette_apply("/help", 0, append_space=True) == "/help"
+    lines = minimal._palette_lines("/pro", 0, width=72)
+    assert any("/provider" in line or "/providers" in line for line in lines)
+    assert any("Space pilih" in line for line in lines)
+
+
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     for key in ("HERMES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):

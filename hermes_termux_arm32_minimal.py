@@ -65,6 +65,13 @@ class ModelEntry:
     source: str = "live"
 
 
+@dataclass(frozen=True)
+class PaletteEntry:
+    command: str
+    description: str
+    takes_args: bool = False
+
+
 MINIMAL_PROVIDERS: dict[str, ProviderPreset] = {
     "openrouter": ProviderPreset(
         "openrouter",
@@ -982,9 +989,214 @@ def _banner(cfg: RuntimeConfig) -> None:
     print(_c("Type /help for commands. Use /models opencode-zen to browse the Hermes catalog.", Ui.dim))
 
 
-def _prompt(cfg: RuntimeConfig) -> str:
+def _prompt_parts(cfg: RuntimeConfig) -> tuple[str, str]:
     status = _shorten_middle(_status_line(cfg), _term_width() - 5)
-    return _c(f"\n╭─ {status}\n╰─› ", Ui.cyan)
+    return _c(f"\n╭─ {status}\n", Ui.cyan), _c("╰─› ", Ui.cyan)
+
+
+def _prompt(cfg: RuntimeConfig) -> str:
+    header, prefix = _prompt_parts(cfg)
+    return header + prefix
+
+
+PALETTE_MAX_ROWS = 8
+
+
+def _palette_active(buffer: str) -> bool:
+    return buffer.startswith("/") and " " not in buffer and "\t" not in buffer
+
+
+def _palette_query(buffer: str) -> str:
+    if not _palette_active(buffer):
+        return ""
+    return buffer[1:].strip().lower()
+
+
+def _palette_candidates(buffer: str) -> list[PaletteEntry]:
+    if not _palette_active(buffer):
+        return []
+    query = _palette_query(buffer)
+    if not query:
+        return list(COMMAND_PALETTE)
+    exact: list[PaletteEntry] = []
+    starts: list[PaletteEntry] = []
+    contains: list[PaletteEntry] = []
+    for entry in COMMAND_PALETTE:
+        command_key = entry.command.lstrip("/").lower()
+        haystack = f"{command_key} {entry.description}".lower()
+        if command_key == query:
+            exact.append(entry)
+        elif command_key.startswith(query):
+            starts.append(entry)
+        elif query in haystack:
+            contains.append(entry)
+    return exact + starts + contains
+
+
+def _palette_entry(buffer: str, selected: int) -> PaletteEntry | None:
+    candidates = _palette_candidates(buffer)
+    if not candidates:
+        return None
+    return candidates[selected % len(candidates)]
+
+
+def _palette_apply(buffer: str, selected: int, *, append_space: bool = False) -> str:
+    entry = _palette_entry(buffer, selected)
+    if entry is None:
+        return buffer
+    if append_space and entry.takes_args:
+        return entry.command + " "
+    return entry.command
+
+
+def _palette_lines(buffer: str, selected: int, *, width: int | None = None) -> list[str]:
+    if not _palette_active(buffer):
+        return []
+    width = width or _term_width()
+    candidates = _palette_candidates(buffer)
+    title = "Commands  ↑/↓ move · Space pilih · Enter apply · Esc batal"
+    lines = [_c("  " + _shorten_middle(title, width - 2), Ui.dim)]
+    if not candidates:
+        lines.append(_c("  no command match", Ui.dim))
+        return lines
+    visible = candidates[:PALETTE_MAX_ROWS]
+    selected = selected % len(candidates)
+    if selected >= PALETTE_MAX_ROWS:
+        start = min(selected, max(0, len(candidates) - PALETTE_MAX_ROWS))
+        visible = candidates[start : start + PALETTE_MAX_ROWS]
+    else:
+        start = 0
+    cmd_width = min(16, max(len(entry.command) for entry in visible) + 2)
+    desc_width = max(12, width - cmd_width - 8)
+    for offset, entry in enumerate(visible):
+        absolute = start + offset
+        marker = "›" if absolute == selected else " "
+        command = entry.command.ljust(cmd_width)
+        desc = _shorten_middle(entry.description, desc_width)
+        line = f"  {marker} {command}{desc}"
+        lines.append(_c(line, Ui.green if absolute == selected else Ui.dim))
+    remaining = len(candidates) - len(visible)
+    if remaining > 0:
+        lines.append(_c(f"  … {remaining} more", Ui.dim))
+    return lines
+
+
+def _read_escape_tail(select_mod: Any) -> str:
+    tail = ""
+    # Termux arrow keys normally arrive as ESC [ A/B/C/D. Read the short tail
+    # without blocking a real Esc key for long.
+    while len(tail) < 5:
+        ready, _w, _x = select_mod.select([sys.stdin], [], [], 0.015)
+        if not ready:
+            break
+        tail += sys.stdin.read(1)
+        if tail in {"[A", "[B", "[C", "[D", "OA", "OB", "OC", "OD"}:
+            break
+    return tail
+
+
+def _redraw_tui_input(prefix: str, buffer: str, selected: int, rendered_lines: int) -> int:
+    if rendered_lines:
+        up = rendered_lines - 1
+        if up:
+            sys.stdout.write(f"\033[{up}A")
+        for idx in range(rendered_lines):
+            sys.stdout.write("\r\033[2K")
+            if idx < rendered_lines - 1:
+                sys.stdout.write("\033[1B")
+        if up:
+            sys.stdout.write(f"\033[{up}A")
+    lines = [prefix + buffer] + _palette_lines(buffer, selected)
+    sys.stdout.write("\n".join(lines))
+    sys.stdout.flush()
+    return len(lines)
+
+
+def _read_tui_input(cfg: RuntimeConfig) -> str:
+    """Read one TUI line, with a stdlib-only slash palette on real terminals.
+
+    The fallback stays as plain input() for pipes/tests/unsupported terminals. The
+    palette intentionally avoids curses/prompt_toolkit so it remains safe on
+    Android ARM32 Termux.
+    """
+    if (
+        os.environ.get("HERMES_ARM32_NO_PALETTE")
+        or not sys.stdin.isatty()
+        or not sys.stdout.isatty()
+    ):
+        return input(_prompt(cfg)).strip()
+    try:
+        import select as select_mod
+        import termios
+        import tty
+    except ImportError:
+        return input(_prompt(cfg)).strip()
+
+    fd = sys.stdin.fileno()
+    try:
+        old_settings = termios.tcgetattr(fd)
+    except (OSError, termios.error):
+        return input(_prompt(cfg)).strip()
+    header, prefix = _prompt_parts(cfg)
+    buffer = ""
+    selected = 0
+    rendered_lines = 0
+    sys.stdout.write(header)
+    try:
+        tty.setcbreak(fd)
+        rendered_lines = _redraw_tui_input(prefix, buffer, selected, rendered_lines)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in {"\r", "\n"}:
+                if _palette_active(buffer) and _palette_entry(buffer, selected) is not None:
+                    buffer = _palette_apply(buffer, selected)
+                rendered_lines = _redraw_tui_input(prefix, buffer, selected, rendered_lines)
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return buffer.strip()
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch == "\x04":
+                if not buffer:
+                    raise EOFError
+                buffer = buffer[:-1]
+                selected = 0
+            elif ch in {"\x7f", "\b"}:
+                buffer = buffer[:-1]
+                selected = 0
+            elif ch == "\x15":  # Ctrl-U
+                buffer = ""
+                selected = 0
+            elif ch == "\x1b":
+                tail = _read_escape_tail(select_mod)
+                if tail in {"[A", "OA"}:
+                    if _palette_candidates(buffer):
+                        selected -= 1
+                elif tail in {"[B", "OB"}:
+                    if _palette_candidates(buffer):
+                        selected += 1
+                elif tail in {"[C", "OC"}:
+                    if _palette_entry(buffer, selected) is not None:
+                        buffer = _palette_apply(buffer, selected, append_space=True)
+                        selected = 0
+                elif not tail:
+                    if _palette_active(buffer):
+                        buffer = ""
+                        selected = 0
+                # Left arrow and unknown escape sequences are ignored.
+            elif ch == "\t":
+                if _palette_entry(buffer, selected) is not None:
+                    buffer = _palette_apply(buffer, selected, append_space=True)
+                    selected = 0
+            elif ch == " " and _palette_entry(buffer, selected) is not None:
+                buffer = _palette_apply(buffer, selected, append_space=True)
+                selected = 0
+            elif ch.isprintable():
+                buffer += ch
+                selected = 0
+            rendered_lines = _redraw_tui_input(prefix, buffer, selected, rendered_lines)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def _print_chat(role: str, text: str, *, model: str = "") -> None:
@@ -1018,10 +1230,27 @@ HELP_ROWS = (
     ("/model <id|number>", "switch model; number uses the last /models result"),
     ("/base-url <url>", "set OpenAI-compatible endpoint"),
     ("/key", "paste API key without echo"),
+    ("/doctor", "show minimal runtime diagnostics"),
     ("/clear", "clear conversation memory"),
     ("/save [--key]", "save provider/base/model to ~/.hermes/.env; --key also saves key"),
     ("/export <file.md>", "export transcript"),
     ("/exit", "quit"),
+)
+
+COMMAND_PALETTE = (
+    PaletteEntry("/help", "show command palette"),
+    PaletteEntry("/status", "show current provider, model, route, key state"),
+    PaletteEntry("/providers", "browse provider presets", takes_args=True),
+    PaletteEntry("/provider", "switch provider by name or number", takes_args=True),
+    PaletteEntry("/models", "browse live + curated models", takes_args=True),
+    PaletteEntry("/model", "switch model by id or number", takes_args=True),
+    PaletteEntry("/base-url", "set API base URL", takes_args=True),
+    PaletteEntry("/key", "paste API key without echo"),
+    PaletteEntry("/doctor", "diagnose minimal runtime config"),
+    PaletteEntry("/clear", "clear conversation memory"),
+    PaletteEntry("/save", "save provider/base/model", takes_args=True),
+    PaletteEntry("/export", "export transcript markdown", takes_args=True),
+    PaletteEntry("/exit", "quit Hermes Pocket"),
 )
 
 
@@ -1343,7 +1572,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
     _banner(cfg)
     while True:
         try:
-            raw = input(_prompt(cfg)).strip()
+            raw = _read_tui_input(cfg).strip()
         except (EOFError, KeyboardInterrupt):
             print("\nbye.")
             return 0
