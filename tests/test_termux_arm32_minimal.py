@@ -82,6 +82,110 @@ def test_chat_uses_openai_compatible_payload(capsys):
     }
 
 
+def test_opencode_responses_model_uses_responses_route(capsys):
+    seen: dict[str, object] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib callback name
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            seen["path"] = self.path
+            seen["auth"] = self.headers.get("Authorization")
+            seen["payload"] = json.loads(body)
+            response = {"output_text": "response route ok"}
+            raw = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, _format, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        rc = minimal.main([
+            "--provider",
+            "opencode-zen",
+            "--base-url",
+            f"http://127.0.0.1:{server.server_port}/zen/v1",
+            "--api-key",
+            "secret",
+            "--model",
+            "gpt-5.6-luna",
+            "chat",
+            "Halo",
+        ])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "response route ok"
+    assert seen["path"] == "/zen/v1/responses"
+    assert seen["auth"] == "Bearer secret"
+    assert seen["payload"] == {
+        "model": "gpt-5.6-luna",
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": "Halo"}]}],
+        "store": False,
+    }
+
+
+def test_opencode_anthropic_model_uses_messages_route(capsys):
+    seen: dict[str, object] = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802 - stdlib callback name
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            seen["path"] = self.path
+            seen["x_api_key"] = self.headers.get("x-api-key")
+            seen["version"] = self.headers.get("anthropic-version")
+            seen["payload"] = json.loads(body)
+            response = {"content": [{"type": "text", "text": "messages route ok"}]}
+            raw = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, _format, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        rc = minimal.main([
+            "--provider",
+            "opencode-zen",
+            "--base-url",
+            f"http://127.0.0.1:{server.server_port}/zen/v1",
+            "--api-key",
+            "secret",
+            "--model",
+            "claude-sonnet-5",
+            "chat",
+            "Halo",
+        ])
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "messages route ok"
+    assert seen["path"] == "/zen/v1/messages"
+    assert seen["x_api_key"] == "secret"
+    assert seen["version"] == "2023-06-01"
+    assert seen["payload"] == {
+        "model": "claude-sonnet-5",
+        "messages": [{"role": "user", "content": "Halo"}],
+        "max_tokens": 4096,
+    }
+
+
 def test_models_free_filters_openrouter_catalog(capsys):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - stdlib callback name
@@ -150,6 +254,34 @@ def test_providers_command_lists_minimal_safe_presets(capsys):
     assert "openrouter" in out
     assert "deepseek" in out
     assert "nvidia" in out
+
+
+def test_providers_selection_shows_opencode_detail(capsys):
+    assert minimal.main(["providers", "opencode-zen"]) == 0
+    out = capsys.readouterr().out
+    assert "Provider · opencode-zen" in out
+    assert "OpenCode Zen" in out
+    assert "OPENCODE_ZEN_API_KEY" in out
+
+
+def test_opencode_zen_offline_catalog_has_many_routed_models(capsys):
+    assert minimal.main(["models", "opencode-zen", "offline", "all"]) == 0
+    out = capsys.readouterr().out
+    assert "x-preview-f-free" in out
+    assert "gpt-5.6-luna" in out
+    assert "responses" in out
+    assert "claude-sonnet-5" in out
+    assert "messages" in out
+    assert "gemini-3-flash" in out
+    assert "chat" in out
+
+
+def test_models_terms_can_choose_provider_and_search(capsys):
+    assert minimal.main(["models", "opencode-zen", "kimi", "offline", "--limit", "20"]) == 0
+    out = capsys.readouterr().out
+    assert "kimi-k3" in out
+    assert "kimi-k2.5" in out
+    assert "claude-sonnet-5" not in out
 
 
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):
