@@ -1618,6 +1618,41 @@ def _apply_model_choice(cfg: RuntimeConfig, model_id: str, provider_id: str) -> 
     _print_notice(f"model set: {cfg.model} ({_mode_label(_api_mode_for(cfg.provider, cfg.model))})")
     return cfg
 
+
+def _system_prompt(cfg: RuntimeConfig, extra: str = "") -> str:
+    prompt = f"""You are Hermes Pocket, a terminal-first assistant running inside Termux Android ARM32 minimal mode.
+You are currently reached through provider `{cfg.provider}`, model `{cfg.model}`, route `{_mode_label(_api_mode_for(cfg.provider, cfg.model))}`, base URL `{cfg.base_url}`.
+
+Ground yourself in the actual runtime:
+- This is Hermes Pocket TUI, not a generic web chatbot.
+- Available now: conversational help through the remote model, provider/model browsing, model switching, API key entry, config save, transcript export, and minimal diagnostics.
+- User-facing slash commands are handled by the TUI: /help, /status, /providers, /provider, /models, /model, /base-url, /key, /doctor, /clear, /save, /export, /exit.
+- Intentionally disabled in this ARM32 minimal build: dashboard/web UI, full Hermes agent tools, MCP, browser/Playwright, vision/HEIF, heavy document extraction, voice/STT, wake-word, and local file/shell tools unless a future build explicitly enables them.
+- Do not claim you can inspect local files, run shell commands, browse the web, control apps, or use MCP/tools from inside this minimal runtime. If the user needs those, explain the limitation and suggest the slash commands or a remote/full Hermes setup.
+- If the user asks "bisa apa aja" or similar, answer with these real Hermes Pocket capabilities and limitations, not a generic assistant capability list.
+- Match the user's language. For Indonesian, use natural Bahasa Indonesia with a concise friendly tone.
+""".strip()
+    if extra.strip():
+        prompt += "\n\nAdditional session instruction from the user/operator:\n" + extra.strip()
+    return prompt
+
+
+def _system_message(cfg: RuntimeConfig, extra: str = "") -> dict[str, str]:
+    return {"role": "system", "content": _system_prompt(cfg, extra)}
+
+
+def _sync_system_message(messages: list[dict[str, str]], cfg: RuntimeConfig, extra: str = "") -> None:
+    message = _system_message(cfg, extra)
+    if messages and messages[0].get("role") == "system":
+        messages[0] = message
+    else:
+        messages.insert(0, message)
+
+
+def _turn_count(messages: list[dict[str, str]]) -> int:
+    return sum(1 for item in messages if item.get("role") == "user")
+
+
 def _handle_models_command(
     cfg: RuntimeConfig,
     rest: list[str],
@@ -1634,7 +1669,8 @@ def _handle_models_command(
 
 def cmd_tui(args: argparse.Namespace) -> int:
     cfg = _runtime_config(args, require_key=False)
-    messages: list[dict[str, str]] = []
+    system_extra = getattr(args, "system", "") or ""
+    messages: list[dict[str, str]] = [_system_message(cfg, system_extra)]
     transcript: list[tuple[str, str]] = []
     last_models: list[ModelEntry] = []
     last_model_provider = cfg.provider
@@ -1727,7 +1763,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
                             choice = (rest[0], cfg.provider)
                         cfg = _apply_model_choice(cfg, *choice)
                 elif cmd == "clear":
-                    messages.clear()
+                    messages[:] = [_system_message(cfg, system_extra)]
                     transcript.clear()
                     _print_notice("conversation cleared")
                 elif cmd == "save":
@@ -1746,6 +1782,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
                 _print_error(str(exc))
             continue
 
+        _sync_system_message(messages, cfg, system_extra)
         _print_chat("you", raw)
         messages.append({"role": "user", "content": raw})
         transcript.append(("you", raw))
@@ -1762,7 +1799,7 @@ def cmd_tui(args: argparse.Namespace) -> int:
         messages.append({"role": "assistant", "content": answer})
         transcript.append(("hermes", answer))
         _print_chat("hermes", answer, model=cfg.model)
-        _print_notice(f"{len(messages)//2} turn · {cfg.provider} · {_mode_label(_api_mode_for(cfg.provider, cfg.model))} · {elapsed:.1f}s")
+        _print_notice(f"{_turn_count(messages)} turn · {cfg.provider} · {_mode_label(_api_mode_for(cfg.provider, cfg.model))} · {elapsed:.1f}s")
 
 
 def _add_runtime_overrides(parser: argparse.ArgumentParser) -> None:
@@ -1814,6 +1851,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tui = sub.add_parser("tui", aliases=["repl"], help="Interactive Hermes Pocket TUI")
     _add_runtime_overrides(tui)
+    tui.add_argument("--system", default="", help="Extra session instruction appended to the Hermes Pocket system prompt")
     tui.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature for chat-completions models")
     tui.add_argument("--max-tokens", type=int, default=None, help="Optional max token cap")
     tui.set_defaults(func=cmd_tui)

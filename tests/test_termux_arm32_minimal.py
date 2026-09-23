@@ -366,6 +366,26 @@ def test_escape_action_handles_termux_arrow_sequences():
     assert minimal._escape_action("[Z") == ""
 
 
+def test_tui_system_prompt_grounds_model_in_pocket_runtime():
+    cfg = minimal.RuntimeConfig("secret", "https://openrouter.ai/api/v1", "model/free:free", 60, "openrouter")
+    messages: list[dict[str, str]] = []
+
+    minimal._sync_system_message(messages, cfg)
+
+    assert messages[0]["role"] == "system"
+    prompt = messages[0]["content"]
+    assert "Hermes Pocket" in prompt
+    assert "Termux Android ARM32 minimal" in prompt
+    assert "/models" in prompt
+    assert "MCP" in prompt
+    assert "Do not claim" in prompt
+    assert minimal._turn_count(messages) == 0
+
+    messages.append({"role": "user", "content": "hai"})
+    messages.append({"role": "assistant", "content": "halo"})
+    assert minimal._turn_count(messages) == 1
+
+
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     for key in ("HERMES_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
