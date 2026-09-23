@@ -1049,12 +1049,32 @@ def _palette_apply(buffer: str, selected: int, *, append_space: bool = False) ->
     return entry.command
 
 
+def _palette_apply_entry(entry: PaletteEntry, *, append_space: bool = False) -> str:
+    if append_space and entry.takes_args:
+        return entry.command + " "
+    return entry.command
+
+
+def _palette_number_choice(buffer: str, digit: str, selected: int) -> str | None:
+    if not (_palette_active(buffer) and digit in "123456789"):
+        return None
+    candidates = _palette_candidates(buffer)
+    if not candidates:
+        return None
+    selected = selected % len(candidates)
+    start = min(selected, max(0, len(candidates) - PALETTE_MAX_ROWS)) if selected >= PALETTE_MAX_ROWS else 0
+    idx = start + int(digit) - 1
+    if idx >= len(candidates):
+        return None
+    return _palette_apply_entry(candidates[idx], append_space=True)
+
+
 def _palette_lines(buffer: str, selected: int, *, width: int | None = None) -> list[str]:
     if not _palette_active(buffer):
         return []
     width = width or _term_width()
     candidates = _palette_candidates(buffer)
-    title = "Commands  ↑/↓ move · Space pilih · Enter apply · Esc batal"
+    title = "Commands  1-9 pilih · Space pilih · Enter apply · Esc batal"
     lines = [_c("  " + _shorten_middle(title, width - 2), Ui.dim)]
     if not candidates:
         lines.append(_c("  no command match", Ui.dim))
@@ -1073,7 +1093,8 @@ def _palette_lines(buffer: str, selected: int, *, width: int | None = None) -> l
         marker = "›" if absolute == selected else " "
         command = entry.command.ljust(cmd_width)
         desc = _shorten_middle(entry.description, desc_width)
-        line = f"  {marker} {command}{desc}"
+        number = str(offset + 1) if offset < 9 else " "
+        line = f"  {marker}{number} {command}{desc}"
         lines.append(_c(line, Ui.green if absolute == selected else Ui.dim))
     remaining = len(candidates) - len(visible)
     if remaining > 0:
@@ -1237,6 +1258,9 @@ def _read_tui_input(cfg: RuntimeConfig) -> str:
                     selected = 0
             elif ch == " " and _palette_entry(buffer, selected) is not None:
                 buffer = _palette_apply(buffer, selected, append_space=True)
+                selected = 0
+            elif (chosen := _palette_number_choice(buffer, ch, selected)) is not None:
+                buffer = chosen
                 selected = 0
             elif ch.isprintable():
                 buffer += ch
