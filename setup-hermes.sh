@@ -34,6 +34,10 @@ cd "$SCRIPT_DIR"
 export UV_NO_CONFIG=1
 
 PYTHON_VERSION="3.11"
+TERMUX_ARM32_MINIMAL=false
+if [ "${HERMES_TERMUX_ARM32_MINIMAL:-}" = "1" ]; then
+    TERMUX_ARM32_MINIMAL=true
+fi
 
 is_termux() {
     [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux/files/usr"* ]]
@@ -49,6 +53,11 @@ is_termux_android_arm32_python() {
 
 check_termux_arm32_support_gate() {
     if ! is_termux_android_arm32_python; then
+        return 0
+    fi
+    if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+        echo -e "${YELLOW}⚠${NC} Termux Android ARM32 detected; using the stdlib-only minimal runtime."
+        echo -e "${YELLOW}⚠${NC} Dashboard, vision, document extraction, voice/STT, wake-word, and normal Hermes CLI deps stay disabled."
         return 0
     fi
     if [ "${HERMES_TERMUX_ARM32_EXPERIMENTAL:-}" = "1" ]; then
@@ -220,6 +229,31 @@ fi
 
 export VIRTUAL_ENV="$SCRIPT_DIR/venv"
 SETUP_PYTHON="$SCRIPT_DIR/venv/bin/python"
+
+if is_termux && [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+    echo -e "${CYAN}→${NC} Preparing stdlib-only Termux ARM32 minimal runtime..."
+    "$SETUP_PYTHON" "$SCRIPT_DIR/hermes_termux_arm32_minimal.py" --version >/dev/null
+    COMMAND_LINK_DIR="$(get_command_link_dir)"
+    COMMAND_LINK_DISPLAY_DIR="$(get_command_link_display_dir)"
+    mkdir -p "$COMMAND_LINK_DIR"
+    rm -f "$COMMAND_LINK_DIR/hermes-arm32" "$COMMAND_LINK_DIR/hermes-termux-arm32"
+    cat > "$COMMAND_LINK_DIR/hermes-arm32" <<EOF
+#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+exec "$SETUP_PYTHON" "$SCRIPT_DIR/hermes_termux_arm32_minimal.py" "\$@"
+EOF
+    chmod +x "$COMMAND_LINK_DIR/hermes-arm32"
+    ln -s "hermes-arm32" "$COMMAND_LINK_DIR/hermes-termux-arm32" 2>/dev/null || true
+    export PATH="$COMMAND_LINK_DIR:$PATH"
+    echo -e "${GREEN}✓${NC} Installed hermes-arm32 → $COMMAND_LINK_DISPLAY_DIR/hermes-arm32"
+    echo ""
+    echo "Try: hermes-arm32 doctor"
+    echo "Chat: HERMES_API_KEY=... HERMES_BASE_URL=https://openrouter.ai/api/v1 HERMES_MODEL=... hermes-arm32 chat 'Halo'"
+    echo ""
+    echo "Disabled on ARM32 minimal: dashboard, vision/HEIF, heavy document extraction, voice/STT, wake-word."
+    exit 0
+fi
 
 # ============================================================================
 # Dependencies

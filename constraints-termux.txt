@@ -18,6 +18,8 @@
 # wheels for several Hermes native packages (pydantic-core, jiter, Pillow,
 # PyYAML/ruamel.yaml.clib, Tornado, httptools/watchfiles, firecrawl-anydoc), so
 # Hermes stops before surprise Rust/C source builds unless explicitly overridden.
+# Use HERMES_TERMUX_ARM32_MINIMAL=1 for the stdlib-only hermes-arm32 chat path;
+# that mode does not install these Python dependencies at all.
 
 ipython<10
 jedi>=0.18.1,<0.20

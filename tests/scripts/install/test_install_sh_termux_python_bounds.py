@@ -125,6 +125,7 @@ def _copy_setup_checkout(tmp_path: Path) -> Path:
     checkout = tmp_path / "checkout"
     checkout.mkdir()
     shutil.copy2(SETUP_HERMES_SH, checkout / "setup-hermes.sh")
+    shutil.copy2(REPO_ROOT / "hermes_termux_arm32_minimal.py", checkout / "hermes_termux_arm32_minimal.py")
     return checkout
 
 
@@ -253,6 +254,31 @@ def test_install_stage_allows_termux_android_arm32_with_explicit_override(tmp_pa
     assert "continuing because HERMES_TERMUX_ARM32_EXPERIMENTAL=1" in result.stdout
 
 
+def test_install_stage_allows_termux_android_arm32_minimal_without_experimental(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_install_prerequisites(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "android",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_SYSCONFIG_PLATFORM": "android-24-armeabi_v7a",
+            "FAKE_MULTIARCH": "arm-linux-androideabi",
+            "HERMES_TERMUX_ARM32_MINIMAL": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "using the stdlib-only minimal runtime" in result.stdout
+    assert "Installing Termux minimal packages" in result.stdout
+    assert "Checking Node.js" not in result.stdout
+    assert "C++ compiler" not in result.stdout
+
+
 def test_install_stage_stops_on_legacy_termux_linux_arm32(tmp_path: Path) -> None:
     """Older Termux Pythons may report sys.platform='linux'; still block ARM32."""
     bin_dir = tmp_path / "bin"
@@ -326,3 +352,27 @@ def test_setup_script_stops_on_termux_android_arm32_without_override(tmp_path: P
     assert "Termux Android ARM32" in result.stdout
     assert "stopping before pip attempts large native builds" in result.stdout
     assert "HERMES_TERMUX_ARM32_EXPERIMENTAL=1" in result.stdout
+
+
+def test_setup_script_arm32_minimal_installs_launcher(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_setup(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "android",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_SYSCONFIG_PLATFORM": "android-24-armeabi_v7a",
+            "FAKE_MULTIARCH": "arm-linux-androideabi",
+            "HERMES_TERMUX_ARM32_MINIMAL": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "using the stdlib-only minimal runtime" in result.stdout
+    assert "Installed hermes-arm32" in result.stdout
+    assert (tmp_path / "com.termux" / "files" / "usr" / "bin" / "hermes-arm32").exists()

@@ -447,6 +447,9 @@ build-backend = "setuptools.build_meta"
 hermes = "hermes_cli.main:main"
 hermes-agent = "run_agent:main"
 hermes-acp = "acp_adapter.entry:main"
+# Stdlib-only fallback for Termux Android ARM32. Normal installers expose a
+# wrapper directly; this entrypoint keeps editable/dev installs discoverable too.
+hermes-arm32 = "hermes_termux_arm32_minimal:main"
 
 [tool.uv]
 override-dependencies = [

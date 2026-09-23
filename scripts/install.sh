@@ -74,6 +74,7 @@ SKIP_BROWSER=false
 SKIP_COMPUTER_USE=false
 NO_SKILLS=false
 BRANCH="main"
+BRANCH_EXPLICIT=false
 INSTALL_COMMIT=""
 FORCE_COMMIT=false
 ENSURE_DEPS=""
@@ -83,6 +84,13 @@ STAGE_NAME=""
 JSON_OUTPUT=false
 NON_INTERACTIVE=false
 INCLUDE_DESKTOP=false
+# Explicit, limited no-native-build runtime for Android/Termux ARM32.
+# Env var is the stable interface for phone testing; --termux-arm32-minimal is
+# a convenience alias for local/scripted installs.
+TERMUX_ARM32_MINIMAL=false
+if [ "${HERMES_TERMUX_ARM32_MINIMAL:-}" = "1" ]; then
+    TERMUX_ARM32_MINIMAL=true
+fi
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -118,6 +126,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --branch|-Branch)
             BRANCH="$2"
+            BRANCH_EXPLICIT=true
             shift 2
             ;;
         --commit|-Commit)
@@ -146,6 +155,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --include-desktop|-IncludeDesktop)
             INCLUDE_DESKTOP=true
+            shift
+            ;;
+        --termux-arm32-minimal)
+            TERMUX_ARM32_MINIMAL=true
+            export HERMES_TERMUX_ARM32_MINIMAL=1
             shift
             ;;
         --dir)
@@ -184,6 +198,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --json         Print a JSON result frame for --stage"
             echo "  --non-interactive  Skip stages that require user input"
             echo "  --include-desktop  Also build the desktop app (apps/desktop -> Hermes.app)"
+            echo "  --termux-arm32-minimal  Install the stdlib-only Termux ARM32 minimal chat runtime"
+            echo "                   (same as HERMES_TERMUX_ARM32_MINIMAL=1)"
             echo "  --dir PATH     Installation directory"
             echo "                   default (non-root):  ~/.hermes/hermes-agent"
             echo "                   default (root, Linux): /usr/local/lib/hermes-agent"
@@ -448,8 +464,21 @@ resolve_install_layout() {
     fi
 
     # Termux: package manager manages /data/data/..., keep code in HERMES_HOME.
+    # For the explicit ARM32 minimal path, prefer the current checkout when the
+    # user runs this script from a cloned repo (the common phone-test workflow),
+    # so we do not accidentally clone/update a different branch under ~/.hermes.
     if is_termux; then
-        INSTALL_DIR="$HERMES_HOME/hermes-agent"
+        if [ "$TERMUX_ARM32_MINIMAL" = true ] && [ -d ".git" ] && [ -f "scripts/install.sh" ]; then
+            INSTALL_DIR="$(pwd)"
+            if [ "$BRANCH_EXPLICIT" = false ]; then
+                current_branch="$(git branch --show-current 2>/dev/null || true)"
+                if [ -n "$current_branch" ]; then
+                    BRANCH="$current_branch"
+                fi
+            fi
+        else
+            INSTALL_DIR="$HERMES_HOME/hermes-agent"
+        fi
         return 0
     fi
 
@@ -754,6 +783,11 @@ is_termux_android_arm32_python() {
 
 check_termux_arm32_support_gate() {
     if ! is_termux_android_arm32_python; then
+        return 0
+    fi
+    if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+        log_warn "Termux Android ARM32 detected; using the stdlib-only minimal runtime."
+        log_warn "Dashboard, vision, document extraction, voice/STT, wake-word, and normal Hermes CLI deps stay disabled."
         return 0
     fi
     if [ "${HERMES_TERMUX_ARM32_EXPERIMENTAL:-}" = "1" ]; then
@@ -1344,6 +1378,22 @@ check_network_prerequisites() {
     else
         log_warn "Network checks failed. Hermes install may complete, but web search and dependency downloads can fail."
         log_info "Verify internet/DNS and retry if pip install fails."
+    fi
+}
+
+install_termux_arm32_minimal_system_packages() {
+    # No clang/rust/make here: the minimal runtime is stdlib-only and must not
+    # prepare or encourage native source builds on 32-bit phones.
+    local termux_pkgs=(ca-certificates curl)
+    if ! command -v rg &> /dev/null; then
+        termux_pkgs+=("ripgrep")
+    fi
+    log_info "Installing Termux minimal packages: ${termux_pkgs[*]}"
+    if pkg install -y "${termux_pkgs[@]}" >/dev/null; then
+        log_success "Termux ARM32 minimal OS packages installed"
+    else
+        log_warn "Could not auto-install all minimal Termux packages"
+        log_info "Install manually: pkg install ${termux_pkgs[*]}"
     fi
 }
 
@@ -2122,6 +2172,66 @@ PY
     log_success "Main package installed"
 
     log_success "All dependencies installed"
+}
+
+termux_arm32_minimal_python() {
+    if [ "$USE_VENV" = true ] && [ -x "$INSTALL_DIR/venv/bin/python" ]; then
+        echo "$INSTALL_DIR/venv/bin/python"
+    else
+        echo "$PYTHON_PATH"
+    fi
+}
+
+install_termux_arm32_minimal_deps() {
+    log_info "Preparing Termux ARM32 minimal runtime..."
+    local minimal_python
+    minimal_python="$(termux_arm32_minimal_python)"
+    if [ ! -f "$INSTALL_DIR/hermes_termux_arm32_minimal.py" ]; then
+        log_error "Minimal runtime file missing: $INSTALL_DIR/hermes_termux_arm32_minimal.py"
+        exit 1
+    fi
+    if ! "$minimal_python" "$INSTALL_DIR/hermes_termux_arm32_minimal.py" --version >/dev/null; then
+        log_error "Minimal runtime self-check failed"
+        exit 1
+    fi
+    log_success "Minimal runtime ready (no Python packages installed)"
+}
+
+setup_termux_arm32_minimal_path() {
+    log_info "Setting up hermes-arm32 command..."
+    local command_link_dir command_link_display_dir minimal_python minimal_entry
+    command_link_dir="$(get_command_link_dir)"
+    command_link_display_dir="$(get_command_link_display_dir)"
+    minimal_python="$(termux_arm32_minimal_python)"
+    minimal_entry="$INSTALL_DIR/hermes_termux_arm32_minimal.py"
+    mkdir -p "$command_link_dir"
+    rm -f "$command_link_dir/hermes-arm32" "$command_link_dir/hermes-termux-arm32"
+    cat > "$command_link_dir/hermes-arm32" <<EOF
+#!/usr/bin/env bash
+unset PYTHONPATH
+unset PYTHONHOME
+exec "$minimal_python" "$minimal_entry" "\$@"
+EOF
+    chmod +x "$command_link_dir/hermes-arm32"
+    ln -s "hermes-arm32" "$command_link_dir/hermes-termux-arm32" 2>/dev/null || true
+    export PATH="$command_link_dir:$PATH"
+    log_success "Installed hermes-arm32 launcher → $command_link_display_dir/hermes-arm32"
+    log_info "Try: hermes-arm32 doctor"
+    log_info "Chat: HERMES_API_KEY=... HERMES_BASE_URL=https://openrouter.ai/api/v1 HERMES_MODEL=... hermes-arm32 chat 'Halo'"
+}
+
+print_termux_arm32_minimal_success() {
+    echo ""
+    echo -e "${GREEN}${BOLD}✓ Hermes Termux ARM32 minimal runtime installed${NC}"
+    echo ""
+    echo "What works now:"
+    echo "  • hermes-arm32 --version"
+    echo "  • hermes-arm32 doctor"
+    echo "  • hermes-arm32 chat '<prompt>' against an OpenAI-compatible HTTP API"
+    echo ""
+    echo "Still intentionally disabled on ARM32 minimal: dashboard, vision/HEIF,"
+    echo "heavy document extraction, voice/STT, wake-word, and normal Hermes CLI deps."
+    echo ""
 }
 
 setup_path() {
@@ -3787,10 +3897,15 @@ run_stage_body() {
             check_python
             check_termux_arm32_support_gate
             check_git
-            check_node
-            check_cxx_compiler
-            check_network_prerequisites
-            install_system_packages
+            if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+                check_network_prerequisites
+                install_termux_arm32_minimal_system_packages
+            else
+                check_node
+                check_cxx_compiler
+                check_network_prerequisites
+                install_system_packages
+            fi
             ;;
         repository)
             detect_os
@@ -3814,23 +3929,35 @@ run_stage_body() {
             install_uv
             check_python
             check_termux_arm32_support_gate
-            install_deps
+            if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+                install_termux_arm32_minimal_deps
+            else
+                install_deps
+            fi
             ;;
         node-deps)
             detect_os
             resolve_install_layout
             require_install_dir
-            check_node
-            install_node_deps || return
-            install_uv
-            install_browser_use_cli
-            install_computer_use_driver
+            if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+                log_info "Skipping Node/browser deps for Termux ARM32 minimal runtime"
+            else
+                check_node
+                install_node_deps || return
+                install_uv
+                install_browser_use_cli
+                install_computer_use_driver
+            fi
             ;;
         path)
             detect_os
             resolve_install_layout
             require_install_dir
-            setup_path
+            if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+                setup_termux_arm32_minimal_path
+            else
+                setup_path
+            fi
             ;;
         config)
             detect_os
@@ -3924,7 +4051,39 @@ run_stage_protocol() {
 # Main
 # ============================================================================
 
+main_termux_arm32_minimal() {
+    print_banner
+
+    detect_os
+    resolve_install_layout
+    install_uv
+    check_python
+    if ! is_termux_android_arm32_python; then
+        log_error "--termux-arm32-minimal / HERMES_TERMUX_ARM32_MINIMAL=1 is only for Termux Android ARM32."
+        log_info "For normal platforms, run the standard installer without this flag."
+        exit 1
+    fi
+    check_termux_arm32_support_gate
+    check_git
+    check_network_prerequisites
+    install_termux_arm32_minimal_system_packages
+
+    clone_repo
+    setup_venv
+    install_termux_arm32_minimal_deps
+    setup_termux_arm32_minimal_path
+    copy_config_templates
+    print_termux_arm32_minimal_success
+    write_bootstrap_marker
+    echo "git-termux-arm32-minimal" > "$INSTALL_DIR/.install_method"
+}
+
 main() {
+    if [ "$TERMUX_ARM32_MINIMAL" = true ]; then
+        main_termux_arm32_minimal
+        return
+    fi
+
     print_banner
 
     detect_os
