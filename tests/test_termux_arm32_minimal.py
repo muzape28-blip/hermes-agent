@@ -379,11 +379,54 @@ def test_tui_system_prompt_grounds_model_in_pocket_runtime():
     assert "/models" in prompt
     assert "MCP" in prompt
     assert "Do not claim" in prompt
+    assert "Local read-only tools are currently disabled" in prompt
     assert minimal._turn_count(messages) == 0
 
     messages.append({"role": "user", "content": "hai"})
     messages.append({"role": "assistant", "content": "halo"})
     assert minimal._turn_count(messages) == 1
+
+
+def test_tui_system_prompt_lists_enabled_read_only_tools(tmp_path):
+    cfg = minimal.RuntimeConfig("secret", "https://openrouter.ai/api/v1", "model/free:free", 60, "openrouter")
+    prompt = minimal._system_prompt(cfg, tools_enabled=True, tool_root=tmp_path)
+
+    assert "Local read-only tools are enabled" in prompt
+    assert "read_file" in prompt
+    assert "respond ONLY with one JSON object" in prompt
+    assert str(tmp_path) in prompt
+
+
+def test_extract_tool_request_accepts_json_and_fenced_json():
+    assert minimal._extract_tool_request('{"tool":"read_file","args":{"path":"README.md"}}') == minimal.ToolRequest(
+        "read_file", {"path": "README.md"}
+    )
+    fenced = '```json\n{"tool_call":{"name":"grep","arguments":{"pattern":"Hermes"}}}\n```'
+    assert minimal._extract_tool_request(fenced) == minimal.ToolRequest("grep", {"pattern": "Hermes"})
+    assert minimal._extract_tool_request("normal answer") is None
+
+
+def test_read_only_tools_are_rooted_and_redact_sensitive_files(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "README.md").write_text("Hermes Pocket\n", encoding="utf-8")
+    (root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+
+    read = minimal._run_pocket_tool("read_file", {"path": "README.md"}, root)
+    assert read.ok is True
+    assert "Hermes Pocket" in read.output
+
+    grep = minimal._run_pocket_tool("grep", {"pattern": "Hermes", "path": "."}, root)
+    assert grep.ok is True
+    assert "README.md:1" in grep.output
+
+    sensitive = minimal._run_pocket_tool("read_file", {"path": ".env"}, root)
+    assert sensitive.ok is False
+    assert "sensitive" in sensitive.output
+
+    escaped = minimal._run_pocket_tool("read_file", {"path": "../outside.txt"}, root)
+    assert escaped.ok is False
+    assert "escapes root" in escaped.output
 
 
 def test_doctor_reports_missing_key(capsys, monkeypatch, tmp_path):

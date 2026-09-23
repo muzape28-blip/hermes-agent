@@ -15,10 +15,12 @@ import json
 import os
 import platform
 import shlex
+import subprocess
 import shutil
 import sys
 import sysconfig
 import textwrap
+import re
 import time
 import urllib.error
 import urllib.request
@@ -70,6 +72,18 @@ class PaletteEntry:
     command: str
     description: str
     takes_args: bool = False
+
+
+@dataclass(frozen=True)
+class ToolResult:
+    ok: bool
+    output: str
+
+
+@dataclass(frozen=True)
+class ToolRequest:
+    name: str
+    args: dict[str, Any]
 
 
 MINIMAL_PROVIDERS: dict[str, ProviderPreset] = {
@@ -1301,6 +1315,7 @@ HELP_ROWS = (
     ("/base-url <url>", "set OpenAI-compatible endpoint"),
     ("/key", "paste API key without echo"),
     ("/doctor", "show minimal runtime diagnostics"),
+    ("/tools [on|off|root]", "manage read-only local Pocket tools"),
     ("/clear", "clear conversation memory"),
     ("/save [--key]", "save provider/base/model to ~/.hermes/.env; --key also saves key"),
     ("/export <file.md>", "export transcript"),
@@ -1317,6 +1332,7 @@ COMMAND_PALETTE = (
     PaletteEntry("/base-url", "set API base URL", takes_args=True),
     PaletteEntry("/key", "paste API key without echo"),
     PaletteEntry("/doctor", "diagnose minimal runtime config"),
+    PaletteEntry("/tools", "manage read-only local tools", takes_args=True),
     PaletteEntry("/clear", "clear conversation memory"),
     PaletteEntry("/save", "save provider/base/model", takes_args=True),
     PaletteEntry("/export", "export transcript markdown", takes_args=True),
@@ -1432,6 +1448,324 @@ def _export_transcript(path: str, transcript: list[tuple[str, str]], cfg: Runtim
         lines.extend([f"## {role}", "", text.rstrip(), ""])
     target.write_text("\n".join(lines), encoding="utf-8")
     return target
+
+
+POCKET_TOOLS: dict[str, str] = {
+    "pwd": "Show the current read-only tool root.",
+    "list_files": "List files under the tool root.",
+    "read_file": "Read a UTF-8 text file under the tool root.",
+    "grep": "Search text files under the tool root with a regex or substring.",
+    "git_status": "Run `git status --short --branch` in the tool root.",
+    "git_diff": "Run `git diff --stat` or `git diff` in the tool root.",
+}
+TOOL_MAX_OUTPUT_CHARS = 12000
+TOOL_READ_MAX_BYTES = 40000
+TOOL_GREP_MAX_MATCHES = 80
+TOOL_LOOP_LIMIT = 4
+SENSITIVE_FILE_NAMES = {
+    ".env",
+    "auth.json",
+    "credentials.json",
+    ".credentials.json",
+    ".netrc",
+    ".git-credentials",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+SENSITIVE_PATH_SUFFIXES = {
+    ".git/config",
+    ".git/credentials",
+    "credentials",
+    "secrets",
+}
+SKIP_DIR_NAMES = {
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".cache",
+}
+
+
+def _tools_default_enabled() -> bool:
+    return str(os.environ.get("HERMES_POCKET_TOOLS") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tool_root() -> Path:
+    raw = os.environ.get("HERMES_TOOL_ROOT") or os.environ.get("HERMES_WORKSPACE") or str(Path.cwd())
+    return Path(raw).expanduser().resolve()
+
+
+def _truncate_tool_output(text: str, limit: int = TOOL_MAX_OUTPUT_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    omitted = len(text) - limit
+    return text[:limit].rstrip() + f"\n\n[truncated {omitted} characters]"
+
+
+def _is_sensitive_path(path: Path, root: Path) -> bool:
+    parts = {part.lower() for part in path.parts}
+    if parts & SENSITIVE_FILE_NAMES:
+        return True
+    try:
+        rel = path.relative_to(root).as_posix().lower()
+    except ValueError:
+        rel = path.as_posix().lower()
+    return any(rel.endswith(suffix) or suffix in rel.split("/") for suffix in SENSITIVE_PATH_SUFFIXES)
+
+
+def _resolve_tool_path(root: Path, raw_path: str | None, *, allow_root: bool = True) -> Path:
+    candidate_raw = (raw_path or ".").strip() or "."
+    candidate = Path(candidate_raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    target = candidate.resolve()
+    if target != root and root not in target.parents:
+        raise SystemExit(f"tool path escapes root: {raw_path!r}")
+    if target == root and allow_root:
+        return target
+    if _is_sensitive_path(target, root):
+        raise SystemExit(f"refusing to read sensitive path: {target.relative_to(root)}")
+    return target
+
+
+def _iter_tool_files(root: Path, start: Path, *, max_files: int = 500) -> list[Path]:
+    files: list[Path] = []
+    if start.is_file():
+        return [start] if not _is_sensitive_path(start, root) else []
+    if not start.is_dir():
+        return []
+    for dirpath, dirnames, filenames in os.walk(start):
+        dir_path = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIR_NAMES and not d.startswith(".")]
+        for filename in filenames:
+            if filename.startswith("."):
+                continue
+            path = dir_path / filename
+            if _is_sensitive_path(path, root):
+                continue
+            files.append(path)
+            if len(files) >= max_files:
+                return files
+    return files
+
+
+def _relative_tool_path(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix() or "."
+    except ValueError:
+        return str(path)
+
+
+def _tool_pwd(root: Path, _args: dict[str, Any]) -> ToolResult:
+    return ToolResult(True, f"tool_root: {root}")
+
+
+def _tool_list_files(root: Path, args: dict[str, Any]) -> ToolResult:
+    target = _resolve_tool_path(root, str(args.get("path") or "."))
+    max_depth = max(0, min(int(args.get("depth") or 2), 6))
+    limit = max(1, min(int(args.get("limit") or 120), 500))
+    if target.is_file():
+        return ToolResult(True, _relative_tool_path(root, target))
+    if not target.is_dir():
+        return ToolResult(False, f"not found or not a directory: {_relative_tool_path(root, target)}")
+    rows: list[str] = []
+    base_depth = len(target.relative_to(root).parts) if target != root else 0
+    for dirpath, dirnames, filenames in os.walk(target):
+        dir_path = Path(dirpath)
+        rel_parts = dir_path.relative_to(root).parts if dir_path != root else ()
+        depth = max(0, len(rel_parts) - base_depth)
+        dirnames[:] = [d for d in sorted(dirnames) if d not in SKIP_DIR_NAMES and not d.startswith(".")]
+        filenames = [f for f in sorted(filenames) if not f.startswith(".")]
+        if depth > max_depth:
+            dirnames[:] = []
+            continue
+        if dir_path != target:
+            rows.append(_relative_tool_path(root, dir_path) + "/")
+        for filename in filenames:
+            path = dir_path / filename
+            if _is_sensitive_path(path, root):
+                continue
+            rows.append(_relative_tool_path(root, path))
+            if len(rows) >= limit:
+                rows.append(f"[truncated after {limit} entries]")
+                return ToolResult(True, "\n".join(rows))
+    return ToolResult(True, "\n".join(rows) if rows else "[empty]")
+
+
+def _tool_read_file(root: Path, args: dict[str, Any]) -> ToolResult:
+    target = _resolve_tool_path(root, str(args.get("path") or ""), allow_root=False)
+    if not target.exists():
+        return ToolResult(False, f"file not found: {_relative_tool_path(root, target)}")
+    if not target.is_file():
+        return ToolResult(False, f"not a file: {_relative_tool_path(root, target)}")
+    with target.open("rb") as handle:
+        raw = handle.read(TOOL_READ_MAX_BYTES + 1)
+    truncated = len(raw) > TOOL_READ_MAX_BYTES
+    raw = raw[:TOOL_READ_MAX_BYTES]
+    if b"\x00" in raw:
+        return ToolResult(False, f"binary file omitted: {_relative_tool_path(root, target)}")
+    text = raw.decode("utf-8", errors="replace")
+    if truncated:
+        text += f"\n\n[truncated after {TOOL_READ_MAX_BYTES} bytes]"
+    return ToolResult(True, text)
+
+
+def _tool_grep(root: Path, args: dict[str, Any]) -> ToolResult:
+    pattern = str(args.get("pattern") or args.get("query") or "").strip()
+    if not pattern:
+        return ToolResult(False, "grep requires `pattern`")
+    target = _resolve_tool_path(root, str(args.get("path") or "."))
+    ignore_case = bool(args.get("ignore_case", True))
+    try:
+        regex = re.compile(pattern, re.IGNORECASE if ignore_case else 0)
+    except re.error:
+        escaped = re.escape(pattern)
+        regex = re.compile(escaped, re.IGNORECASE if ignore_case else 0)
+    matches: list[str] = []
+    for path in _iter_tool_files(root, target):
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(TOOL_READ_MAX_BYTES)
+        except OSError:
+            continue
+        if b"\x00" in raw:
+            continue
+        text = raw.decode("utf-8", errors="replace")
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if regex.search(line):
+                rel = _relative_tool_path(root, path)
+                matches.append(f"{rel}:{line_no}: {line[:240]}")
+                if len(matches) >= TOOL_GREP_MAX_MATCHES:
+                    matches.append(f"[truncated after {TOOL_GREP_MAX_MATCHES} matches]")
+                    return ToolResult(True, "\n".join(matches))
+    return ToolResult(True, "\n".join(matches) if matches else "[no matches]")
+
+
+def _run_git(root: Path, args: list[str]) -> ToolResult:
+    try:
+        proc = subprocess.run(
+            ["git", *args], cwd=str(root), text=True, capture_output=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return ToolResult(False, f"git failed: {exc}")
+    output = (proc.stdout or "") + (proc.stderr or "")
+    if not output.strip():
+        output = f"git exited {proc.returncode} with no output"
+    return ToolResult(proc.returncode == 0, _truncate_tool_output(output.strip()))
+
+
+def _tool_git_status(root: Path, _args: dict[str, Any]) -> ToolResult:
+    return _run_git(root, ["status", "--short", "--branch"])
+
+
+def _tool_git_diff(root: Path, args: dict[str, Any]) -> ToolResult:
+    stat_only = bool(args.get("stat", True))
+    if stat_only:
+        return _run_git(root, ["diff", "--stat"])
+    return _run_git(root, ["diff", "--", "."])
+
+
+def _run_pocket_tool(name: str, args: dict[str, Any], root: Path) -> ToolResult:
+    tool = name.strip().lower().replace("-", "_")
+    try:
+        if tool == "pwd":
+            return _tool_pwd(root, args)
+        if tool == "list_files":
+            return _tool_list_files(root, args)
+        if tool == "read_file":
+            return _tool_read_file(root, args)
+        if tool == "grep":
+            return _tool_grep(root, args)
+        if tool == "git_status":
+            return _tool_git_status(root, args)
+        if tool == "git_diff":
+            return _tool_git_diff(root, args)
+    except (OSError, ValueError, SystemExit) as exc:
+        return ToolResult(False, str(exc))
+    return ToolResult(False, f"unknown tool: {name}")
+
+
+def _parse_json_object_maybe(text: str) -> dict[str, Any] | None:
+    body = text.strip()
+    if body.startswith("```"):
+        lines = body.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            body = "\n".join(lines[1:-1]).strip()
+            if body.lower().startswith("json\n"):
+                body = body[5:].strip()
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_tool_request(text: str) -> ToolRequest | None:
+    data = _parse_json_object_maybe(text)
+    if not data:
+        return None
+    if isinstance(data.get("tool_call"), dict):
+        data = data["tool_call"]
+    name = data.get("tool") or data.get("name")
+    args = data.get("args", data.get("arguments", {}))
+    if isinstance(args, str):
+        try:
+            loaded = json.loads(args)
+            args = loaded if isinstance(loaded, dict) else {}
+        except json.JSONDecodeError:
+            args = {}
+    if not isinstance(name, str) or not name.strip() or not isinstance(args, dict):
+        return None
+    return ToolRequest(name.strip(), args)
+
+
+def _tool_result_prompt(request: ToolRequest, result: ToolResult) -> str:
+    status = "ok" if result.ok else "error"
+    args = json.dumps(request.args, ensure_ascii=False, sort_keys=True)
+    output = _truncate_tool_output(result.output)
+    return (
+        "Hermes Pocket read-only tool result\n"
+        f"tool: {request.name}\n"
+        f"args: {args}\n"
+        f"status: {status}\n"
+        "output:\n"
+        f"{output}\n\n"
+        "Continue. If you have enough information, answer the user normally. "
+        "If another read-only tool is required, respond ONLY with the next tool JSON."
+    )
+
+
+def _print_tools_status(enabled: bool, root: Path) -> None:
+    _section("Tools", "Read-only local tools for Hermes Pocket.")
+    print(f"  status   {'on' if enabled else 'off'}")
+    print(f"  root     {root}")
+    print("  enable   /tools on")
+    print("  disable  /tools off")
+    print("  root     /tools root <path>")
+    print("  tools")
+    for name, desc in POCKET_TOOLS.items():
+        print(f"    {name:<12} {desc}")
+
+
+def _tools_instruction(enabled: bool, root: Path) -> str:
+    if not enabled:
+        return "Local read-only tools are currently disabled. The user can enable them with /tools on."
+    tool_lines = "\n".join(f"- {name}: {desc}" for name, desc in POCKET_TOOLS.items())
+    return f"""Local read-only tools are enabled under tool root `{root}`.
+When you need a tool, respond ONLY with one JSON object, no markdown and no prose:
+{{"tool":"read_file","args":{{"path":"README.md"}}}}
+Available tools:
+{tool_lines}
+Rules: use tools only when they help answer the user's request; never request secrets or credentials; paths must stay under the tool root; after a tool result, answer normally or request one more tool JSON if needed.""".strip()
 
 
 def _parse_model_terms(terms: list[str]) -> tuple[str, bool, bool, str]:
@@ -1619,16 +1953,18 @@ def _apply_model_choice(cfg: RuntimeConfig, model_id: str, provider_id: str) -> 
     return cfg
 
 
-def _system_prompt(cfg: RuntimeConfig, extra: str = "") -> str:
+def _system_prompt(cfg: RuntimeConfig, extra: str = "", *, tools_enabled: bool = False, tool_root: Path | None = None) -> str:
+    tool_root = tool_root or _tool_root()
     prompt = f"""You are Hermes Pocket, a terminal-first assistant running inside Termux Android ARM32 minimal mode.
 You are currently reached through provider `{cfg.provider}`, model `{cfg.model}`, route `{_mode_label(_api_mode_for(cfg.provider, cfg.model))}`, base URL `{cfg.base_url}`.
 
 Ground yourself in the actual runtime:
 - This is Hermes Pocket TUI, not a generic web chatbot.
-- Available now: conversational help through the remote model, provider/model browsing, model switching, API key entry, config save, transcript export, and minimal diagnostics.
-- User-facing slash commands are handled by the TUI: /help, /status, /providers, /provider, /models, /model, /base-url, /key, /doctor, /clear, /save, /export, /exit.
-- Intentionally disabled in this ARM32 minimal build: dashboard/web UI, full Hermes agent tools, MCP, browser/Playwright, vision/HEIF, heavy document extraction, voice/STT, wake-word, and local file/shell tools unless a future build explicitly enables them.
-- Do not claim you can inspect local files, run shell commands, browse the web, control apps, or use MCP/tools from inside this minimal runtime. If the user needs those, explain the limitation and suggest the slash commands or a remote/full Hermes setup.
+- Available now: conversational help through the remote model, provider/model browsing, model switching, API key entry, config save, transcript export, minimal diagnostics, and optional read-only Pocket tools.
+- User-facing slash commands are handled by the TUI: /help, /status, /providers, /provider, /models, /model, /base-url, /key, /doctor, /tools, /clear, /save, /export, /exit.
+- Intentionally disabled in this ARM32 minimal build: dashboard/web UI, full Hermes agent tools, MCP, browser/Playwright, vision/HEIF, heavy document extraction, voice/STT, wake-word, and write/shell tools unless a future build explicitly enables them.
+- Do not claim you can write files, run arbitrary shell commands, browse the web, control apps, or use MCP/full Hermes tools from inside this minimal runtime. If the user needs those, explain the limitation and suggest the slash commands or a remote/full Hermes setup.
+{_tools_instruction(tools_enabled, tool_root)}
 - If the user asks "bisa apa aja" or similar, answer with these real Hermes Pocket capabilities and limitations, not a generic assistant capability list.
 - Match the user's language. For Indonesian, use natural Bahasa Indonesia with a concise friendly tone.
 """.strip()
@@ -1637,12 +1973,21 @@ Ground yourself in the actual runtime:
     return prompt
 
 
-def _system_message(cfg: RuntimeConfig, extra: str = "") -> dict[str, str]:
-    return {"role": "system", "content": _system_prompt(cfg, extra)}
+def _system_message(
+    cfg: RuntimeConfig, extra: str = "", *, tools_enabled: bool = False, tool_root: Path | None = None
+) -> dict[str, str]:
+    return {"role": "system", "content": _system_prompt(cfg, extra, tools_enabled=tools_enabled, tool_root=tool_root)}
 
 
-def _sync_system_message(messages: list[dict[str, str]], cfg: RuntimeConfig, extra: str = "") -> None:
-    message = _system_message(cfg, extra)
+def _sync_system_message(
+    messages: list[dict[str, str]],
+    cfg: RuntimeConfig,
+    extra: str = "",
+    *,
+    tools_enabled: bool = False,
+    tool_root: Path | None = None,
+) -> None:
+    message = _system_message(cfg, extra, tools_enabled=tools_enabled, tool_root=tool_root)
     if messages and messages[0].get("role") == "system":
         messages[0] = message
     else:
@@ -1670,7 +2015,11 @@ def _handle_models_command(
 def cmd_tui(args: argparse.Namespace) -> int:
     cfg = _runtime_config(args, require_key=False)
     system_extra = getattr(args, "system", "") or ""
-    messages: list[dict[str, str]] = [_system_message(cfg, system_extra)]
+    tools_enabled = _tools_default_enabled()
+    tool_root = _tool_root()
+    messages: list[dict[str, str]] = [
+        _system_message(cfg, system_extra, tools_enabled=tools_enabled, tool_root=tool_root)
+    ]
     transcript: list[tuple[str, str]] = []
     last_models: list[ModelEntry] = []
     last_model_provider = cfg.provider
@@ -1762,8 +2111,34 @@ def cmd_tui(args: argparse.Namespace) -> int:
                         if choice is None:
                             choice = (rest[0], cfg.provider)
                         cfg = _apply_model_choice(cfg, *choice)
+                elif cmd == "tools":
+                    subcmd = rest[0].lower() if rest else ""
+                    if subcmd in {"on", "enable", "enabled"}:
+                        tools_enabled = True
+                        _print_tools_status(tools_enabled, tool_root)
+                    elif subcmd in {"off", "disable", "disabled"}:
+                        tools_enabled = False
+                        _print_tools_status(tools_enabled, tool_root)
+                    elif subcmd == "root":
+                        if len(rest) < 2:
+                            _print_notice(f"current tool root: {tool_root}")
+                        else:
+                            new_root = Path(rest[1]).expanduser().resolve()
+                            if not new_root.exists() or not new_root.is_dir():
+                                _print_error(f"tool root is not a directory: {new_root}")
+                            else:
+                                tool_root = new_root
+                                last_models = []
+                                _print_tools_status(tools_enabled, tool_root)
+                    else:
+                        _print_tools_status(tools_enabled, tool_root)
+                    _sync_system_message(
+                        messages, cfg, system_extra, tools_enabled=tools_enabled, tool_root=tool_root
+                    )
                 elif cmd == "clear":
-                    messages[:] = [_system_message(cfg, system_extra)]
+                    messages[:] = [
+                        _system_message(cfg, system_extra, tools_enabled=tools_enabled, tool_root=tool_root)
+                    ]
                     transcript.clear()
                     _print_notice("conversation cleared")
                 elif cmd == "save":
@@ -1782,14 +2157,35 @@ def cmd_tui(args: argparse.Namespace) -> int:
                 _print_error(str(exc))
             continue
 
-        _sync_system_message(messages, cfg, system_extra)
+        _sync_system_message(messages, cfg, system_extra, tools_enabled=tools_enabled, tool_root=tool_root)
         _print_chat("you", raw)
         messages.append({"role": "user", "content": raw})
         transcript.append(("you", raw))
         started = time.monotonic()
         print(_c("  Thinking...", Ui.dim))
+        answer = ""
+        tool_calls = 0
         try:
-            answer = _chat_completion(messages, cfg, temperature=args.temperature, max_tokens=args.max_tokens)
+            while True:
+                answer = _chat_completion(messages, cfg, temperature=args.temperature, max_tokens=args.max_tokens)
+                request = _extract_tool_request(answer)
+                if not (tools_enabled and request is not None):
+                    break
+                tool_calls += 1
+                if tool_calls > TOOL_LOOP_LIMIT:
+                    messages.append({"role": "assistant", "content": answer})
+                    messages.append({
+                        "role": "user",
+                        "content": "Hermes Pocket tool loop limit reached. Answer the user with what you know.",
+                    })
+                    answer = _chat_completion(messages, cfg, temperature=args.temperature, max_tokens=args.max_tokens)
+                    break
+                _print_notice(f"tool {tool_calls}: {request.name} {json.dumps(request.args, ensure_ascii=False)}")
+                result = _run_pocket_tool(request.name, request.args, tool_root)
+                _print_notice("tool result: " + ("ok" if result.ok else "error"))
+                messages.append({"role": "assistant", "content": answer})
+                messages.append({"role": "user", "content": _tool_result_prompt(request, result)})
+                transcript.append(("tool", f"{request.name} {json.dumps(request.args, ensure_ascii=False)}\n{result.output}"))
         except SystemExit as exc:
             _print_error(str(exc))
             messages.pop()
