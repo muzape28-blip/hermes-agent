@@ -1074,7 +1074,7 @@ def _palette_lines(buffer: str, selected: int, *, width: int | None = None) -> l
         return []
     width = width or _term_width()
     candidates = _palette_candidates(buffer)
-    title = "Commands  1-9 pilih · Space pilih · Enter apply · Esc batal"
+    title = "Commands  Space turun · Enter apply · Tab isi arg · Esc batal"
     lines = [_c("  " + _shorten_middle(title, width - 2), Ui.dim)]
     if not candidates:
         lines.append(_c("  no command match", Ui.dim))
@@ -1256,9 +1256,8 @@ def _read_tui_input(cfg: RuntimeConfig) -> str:
                 if _palette_entry(buffer, selected) is not None:
                     buffer = _palette_apply(buffer, selected, append_space=True)
                     selected = 0
-            elif ch == " " and _palette_entry(buffer, selected) is not None:
-                buffer = _palette_apply(buffer, selected, append_space=True)
-                selected = 0
+            elif ch == " " and _palette_active(buffer) and _palette_candidates(buffer):
+                selected += 1
             elif (chosen := _palette_number_choice(buffer, ch, selected)) is not None:
                 buffer = chosen
                 selected = 0

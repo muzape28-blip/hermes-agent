@@ -347,7 +347,7 @@ def test_slash_palette_space_select_adds_argument_space_only_when_needed():
     assert minimal._palette_apply("/help", 0, append_space=True) == "/help"
     lines = minimal._palette_lines("/pro", 0, width=72)
     assert any("/provider" in line or "/providers" in line for line in lines)
-    assert any("1-9 pilih" in line for line in lines)
+    assert any("Space turun" in line for line in lines)
 
 
 def test_slash_palette_number_choice_selects_visible_command():
