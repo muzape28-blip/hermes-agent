@@ -39,6 +39,29 @@ is_termux() {
     [ -n "${TERMUX_VERSION:-}" ] || [[ "${PREFIX:-}" == *"com.termux/files/usr"* ]]
 }
 
+is_termux_android_arm32_python() {
+    is_termux || return 1
+    [ -n "${PYTHON_PATH:-}" ] || return 1
+    local verdict
+    verdict="$($PYTHON_PATH -c "import os, platform, sys, sysconfig; machine=(platform.machine() or '').lower(); plat=(sysconfig.get_platform() or '').lower(); multiarch=(sysconfig.get_config_var('MULTIARCH') or '').lower(); release=(platform.release() or '').lower(); prefix=os.environ.get('PREFIX','').lower(); is_android=(sys.platform == 'android' or 'android' in release or 'com.termux' in prefix or bool(os.environ.get('ANDROID_ROOT'))); arm32=(machine in {'arm','armv7l','armv8l'} or 'armeabi' in plat or 'arm-linux-androideabi' in multiarch); print('yes' if is_android and arm32 else 'no')" 2>/dev/null)"
+    [ "$verdict" = "yes" ]
+}
+
+check_termux_arm32_support_gate() {
+    if ! is_termux_android_arm32_python; then
+        return 0
+    fi
+    if [ "${HERMES_TERMUX_ARM32_EXPERIMENTAL:-}" = "1" ]; then
+        echo -e "${YELLOW}⚠${NC} Termux Android ARM32 detected; continuing because HERMES_TERMUX_ARM32_EXPERIMENTAL=1"
+        echo -e "${YELLOW}⚠${NC} This may attempt native Rust/C builds for packages without android_*/armeabi-v7a wheels."
+        return 0
+    fi
+    echo -e "${RED}✗${NC} Termux Android ARM32 (armeabi-v7a / armv8l) is not supported by the standard setup yet."
+    echo "    Hermes is stopping before pip attempts large native builds. Blockers include pydantic-core, jiter, PyYAML/ruamel.yaml.clib, Tornado, Pillow, httptools/watchfiles, and firecrawl-anydoc wheels for android_*/armeabi-v7a."
+    echo "    If you intentionally want to experiment anyway, rerun with: HERMES_TERMUX_ARM32_EXPERIMENTAL=1"
+    exit 1
+}
+
 get_command_link_dir() {
     if is_termux && [ -n "${PREFIX:-}" ]; then
         echo "$PREFIX/bin"
@@ -161,6 +184,7 @@ if is_termux; then
         fi
         exit 1
     fi
+    check_termux_arm32_support_gate
 else
     if $UV_CMD python find "$PYTHON_VERSION" &> /dev/null; then
         PYTHON_PATH=$($UV_CMD python find "$PYTHON_VERSION")

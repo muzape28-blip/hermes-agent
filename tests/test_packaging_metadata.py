@@ -450,6 +450,88 @@ def _extra_closure(extras: dict, name: str) -> set:
     return seen
 
 
+_ANDROID_ARM32_MARKER_BITS = (
+    "sys_platform != 'android'",
+    "'android' not in platform_release",
+    "platform_machine != 'armv7l'",
+    "platform_machine != 'armv8l'",
+    "platform_machine != 'arm'",
+)
+
+
+def test_android_arm32_native_blockers_are_not_unconditional_core_deps():
+    """Android ARM32/armeabi-v7a must not get surprise native source builds.
+
+    PyPI currently does not publish android_*/armeabi-v7a wheels for these
+    packages.  They may remain core for supported wheel targets, but the core
+    requirement must carry a marker that excludes Termux ARM32; explicit extras
+    are the opt-in path.
+    """
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    deps = project["dependencies"]
+    wanted = {"firecrawl-anydoc", "pillow", "pillow-heif", "httptools", "watchfiles"}
+    seen: dict[str, str] = {}
+    for spec in deps:
+        name = _distribution_name(spec)
+        if name in wanted:
+            seen[name] = spec
+    assert wanted <= set(seen), seen
+    for name, spec in seen.items():
+        marker = spec.split(";", 1)[1] if ";" in spec else ""
+        for bit in _ANDROID_ARM32_MARKER_BITS:
+            assert bit in marker, f"{name} must exclude Android ARM32 from core: {spec!r}"
+
+    extras = project["optional-dependencies"]
+    assert any(_distribution_name(spec) == "firecrawl-anydoc" for spec in extras["doc-extract"])
+    assert any(_distribution_name(spec) == "pillow-heif" for spec in extras["heif"])
+    assert {"httptools", "watchfiles"} <= {_distribution_name(spec) for spec in extras["server-speedups"]}
+    assert any(_distribution_name(spec) == "pillow" for spec in extras["vision"])
+
+
+def test_uv_lock_matches_android_arm32_native_blocker_markers():
+    """Keep uv.lock in sync with the Termux ARM32 safety markers.
+
+    A stale lockfile can reintroduce the old unconditional core graph for
+    ``uv sync --locked`` even when pyproject.toml is fixed.
+    """
+    lock = tomllib.loads((REPO_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    root = next(pkg for pkg in lock["package"] if pkg["name"] == "hermes-agent")
+    wanted = {"firecrawl-anydoc", "pillow", "pillow-heif", "httptools", "watchfiles"}
+
+    core_deps = {
+        _canonical(dep["name"]): dep.get("marker", "")
+        for dep in root["dependencies"]
+        if _canonical(dep["name"]) in wanted
+    }
+    assert wanted <= set(core_deps), core_deps
+    for name, marker in core_deps.items():
+        for bit in _ANDROID_ARM32_MARKER_BITS:
+            assert bit in marker, f"uv.lock core dependency {name} lacks Android ARM32 marker: {marker!r}"
+
+    metadata = root["metadata"]
+    core_requires: dict[str, str] = {}
+    extra_requires: dict[str, set[str]] = {name: set() for name in wanted}
+    for req in metadata["requires-dist"]:
+        name = _canonical(req["name"])
+        if name not in wanted:
+            continue
+        marker = req.get("marker", "")
+        if "extra ==" in marker:
+            extra_requires[name].add(marker)
+        else:
+            core_requires[name] = marker
+    assert wanted <= set(core_requires), core_requires
+    for name, marker in core_requires.items():
+        for bit in _ANDROID_ARM32_MARKER_BITS:
+            assert bit in marker, f"uv.lock metadata requirement {name} lacks Android ARM32 marker: {marker!r}"
+
+    assert "extra == 'doc-extract'" in extra_requires["firecrawl-anydoc"]
+    assert "extra == 'heif'" in extra_requires["pillow-heif"]
+    assert "extra == 'vision'" in extra_requires["pillow"]
+    assert "extra == 'server-speedups'" in extra_requires["httptools"]
+    assert "extra == 'server-speedups'" in extra_requires["watchfiles"]
+
+
 def test_termux_install_paths_never_request_uvloop():
     """uvloop's bundled libuv does not configure on Android/Termux (#116016).
 

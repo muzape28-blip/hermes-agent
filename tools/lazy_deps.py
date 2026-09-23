@@ -15,6 +15,7 @@ import configparser
 import contextlib
 import logging
 import os
+import platform
 import re
 import shutil
 import site
@@ -193,11 +194,10 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "starlette==1.3.1",
         "python-multipart==0.0.32",  # FastAPI UploadFile/Form streaming uploads
     ),
-    # Pillow and firecrawl-anydoc are CORE deps; these entries self-heal lean/partial installs.
+    # Pillow and firecrawl-anydoc are core on supported wheel targets and explicit opt-ins on
+    # Android ARM32/armeabi-v7a. These entries self-heal lean/partial installs, but the
+    # platform gate below refuses surprise native builds on Termux ARM32.
     # Call sites use prompt=False so read_file / vision never block on input() mid-session.
-    # Vision image-resize recovery (Pillow). Pillow is now a CORE dependency (pyproject `dependencies`), so
-    # this entry is a belt-and-suspenders fallback for stripped/source-build installs that somehow dropped
-    # it. See #40490.
     "tool.vision": ("Pillow==12.3.0",),
     "tool.doc_extract": ("firecrawl-anydoc==0.2.4",),  # imports as `anydoc`; lockstep with pyproject
     # MCP client SDK for the cua-driver, so computer_use never dead-ends on `No module named 'mcp'`.
@@ -341,11 +341,65 @@ def _allow_lazy_installs() -> bool:
     return True
 
 
+_ANDROID_ARM32_FEATURE_BLOCKERS: dict[str, str] = {
+    "tool.doc_extract": (
+        "firecrawl-anydoc has no PyPI wheel for android_*/armeabi-v7a; source-building its Rust "
+        "extension on a 32-bit phone is not a safe lazy-install path. Convert the file manually, use "
+        "hosted extraction, or install a reviewed Android ARM32 wheel yourself."
+    ),
+    "tool.vision": (
+        "Pillow has no PyPI wheel for android_*/armeabi-v7a. Install Termux's python-pillow into the "
+        "same interpreter or opt into a reviewed wheelhouse; Hermes will not compile it lazily."
+    ),
+    "tool.dashboard": (
+        "the dashboard stack reaches FastAPI/Pydantic native dependencies that do not publish "
+        "android_*/armeabi-v7a wheels."
+    ),
+    "platform.telegram": (
+        "python-telegram-bot[webhooks] reaches Tornado, which has no android_*/armeabi-v7a wheel."
+    ),
+    "stt.faster_whisper": (
+        "faster-whisper depends on CTranslate2/ONNXRuntime-style native packages that are not available "
+        "as Android ARM32 wheels. Use remote/cloud STT instead."
+    ),
+    "wake.openwakeword": "openWakeWord depends on ONNXRuntime, which is not available as an Android ARM32 wheel.",
+    "wake.sherpa": "sherpa-onnx is a native speech stack and is not available as an Android ARM32 wheel.",
+    "wake.porcupine": "Porcupine/sounddevice wake-word stacks are not a safe Android ARM32 lazy install.",
+}
+
+
+def _is_android_arm32() -> bool:
+    """True for Termux/Android 32-bit ARM (armeabi-v7a / armv7l / armv8l)."""
+    release = (platform.release() or "").lower()
+    prefix = os.environ.get("PREFIX", "").lower()
+    is_android = (
+        sys.platform == "android"
+        or "android" in release
+        or "com.termux" in prefix
+        or bool(os.environ.get("ANDROID_ROOT"))
+    )
+    if not is_android:
+        return False
+    machine = (platform.machine() or "").lower()
+    sys_platform = (sysconfig.get_platform() or "").lower()
+    return (
+        machine in {"arm", "armv7l", "armv8l"}
+        or "armeabi" in sys_platform
+        or "arm-linux-androideabi" in (sysconfig.get_config_var("MULTIARCH") or "").lower()
+    )
+
+
 def _unsupported_feature_reason(feature: str) -> Optional[str]:
     """Platform capability gate (not policy): why a feature cannot work on this host, or None."""
     if sys.platform == "win32" and feature == "platform.matrix":
         return ("unsupported on Windows: Matrix E2EE depends on python-olm, which has no Windows wheel and "
                 "requires make + libolm to build from sdist. Run Hermes under WSL to use Matrix on Windows.")
+    if _is_android_arm32():
+        reason = _ANDROID_ARM32_FEATURE_BLOCKERS.get(feature)
+        if reason is None and feature.startswith("wake."):
+            reason = "wake-word engines depend on native audio/ML wheels that are not available for Android ARM32."
+        if reason:
+            return f"unsupported on Termux/Android ARM32: {reason}"
     return None
 
 

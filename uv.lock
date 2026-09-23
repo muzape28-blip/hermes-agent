@@ -1739,8 +1739,8 @@ dependencies = [
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "fire" },
-    { name = "firecrawl-anydoc" },
-    { name = "httptools" },
+    { name = "firecrawl-anydoc", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')" },
+    { name = "httptools", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')" },
     { name = "httpx", extra = ["socks"] },
     { name = "jinja2" },
     { name = "markdown" },
@@ -1748,8 +1748,8 @@ dependencies = [
     { name = "openai" },
     { name = "packaging" },
     { name = "pathspec" },
-    { name = "pillow" },
-    { name = "pillow-heif" },
+    { name = "pillow", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')" },
+    { name = "pillow-heif", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')" },
     { name = "prompt-toolkit" },
     { name = "psutil" },
     { name = "ptyprocess", marker = "sys_platform != 'win32'" },
@@ -1768,7 +1768,7 @@ dependencies = [
     { name = "tzdata", marker = "sys_platform == 'win32'" },
     { name = "urllib3" },
     { name = "uvicorn" },
-    { name = "watchfiles" },
+    { name = "watchfiles", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')" },
     { name = "websockets" },
 ]
 
@@ -1810,6 +1810,9 @@ computer-use = [
 ]
 daytona = [
     { name = "daytona" },
+]
+doc-extract = [
+    { name = "firecrawl-anydoc" },
 ]
 dev = [
     { name = "debugpy" },
@@ -1859,6 +1862,9 @@ google-chat = [
     { name = "google-cloud-pubsub" },
     { name = "httplib2" },
     { name = "pyasn1" },
+]
+heif = [
+    { name = "pillow-heif" },
 ]
 hindsight = [
     { name = "hindsight-client" },
@@ -1911,6 +1917,11 @@ slack = [
     { name = "slack-bolt" },
     { name = "slack-sdk" },
 ]
+server-speedups = [
+    { name = "hermes-agent", extras = ["uvloop"] },
+    { name = "httptools" },
+    { name = "watchfiles" },
+]
 sms = [
     { name = "aiohttp" },
 ]
@@ -1958,6 +1969,9 @@ vercel = [
 ]
 vertex = [
     { name = "google-auth" },
+]
+vision = [
+    { name = "pillow" },
 ]
 voice = [
     { name = "faster-whisper" },
@@ -2022,7 +2036,8 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'web'", specifier = "==0.133.1" },
     { name = "faster-whisper", marker = "extra == 'voice'", specifier = "==1.2.1" },
     { name = "fire", specifier = "==0.7.1" },
-    { name = "firecrawl-anydoc", specifier = "==0.2.4" },
+    { name = "firecrawl-anydoc", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')", specifier = "==0.2.4" },
+    { name = "firecrawl-anydoc", marker = "extra == 'doc-extract'", specifier = "==0.2.4" },
     { name = "firecrawl-py", marker = "extra == 'firecrawl'", specifier = "==4.17.0" },
     { name = "google-api-python-client", marker = "extra == 'google'", specifier = "==2.194.0" },
     { name = "google-api-python-client", marker = "extra == 'google-chat'", specifier = "==2.194.0" },
@@ -2051,6 +2066,7 @@ requires-dist = [
     { name = "hermes-agent", extras = ["sms"], marker = "extra == 'termux-all'" },
     { name = "hermes-agent", extras = ["termux"], marker = "extra == 'termux-all'" },
     { name = "hermes-agent", extras = ["uvloop"], marker = "extra == 'all'" },
+    { name = "hermes-agent", extras = ["uvloop"], marker = "extra == 'server-speedups'" },
     { name = "hermes-agent", extras = ["web"], marker = "extra == 'all'" },
     { name = "hermes-agent", extras = ["web"], marker = "extra == 'termux-all'" },
     { name = "hermes-agent", extras = ["youtube"], marker = "extra == 'all'" },
@@ -2058,7 +2074,8 @@ requires-dist = [
     { name = "honcho-ai", marker = "extra == 'honcho'", specifier = "==2.2.0" },
     { name = "httplib2", marker = "extra == 'google'", specifier = "==0.32.0" },
     { name = "httplib2", marker = "extra == 'google-chat'", specifier = "==0.32.0" },
-    { name = "httptools", specifier = ">=0.6.3,<0.9" },
+    { name = "httptools", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')", specifier = ">=0.6.3,<0.9" },
+    { name = "httptools", marker = "extra == 'server-speedups'", specifier = ">=0.6.3,<0.9" },
     { name = "httpx", extras = ["socks"], specifier = "==0.28.1" },
     { name = "httpx2", marker = "extra == 'computer-use'", specifier = "==2.7.0" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = "==2.7.0" },
@@ -2085,8 +2102,10 @@ requires-dist = [
     { name = "packaging", specifier = "==26.0" },
     { name = "parallel-web", marker = "extra == 'parallel-web'", specifier = "==0.4.2" },
     { name = "pathspec", specifier = "==1.1.1" },
-    { name = "pillow", specifier = "==12.3.0" },
-    { name = "pillow-heif", specifier = ">=1.4.0,<2" },
+    { name = "pillow", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')", specifier = "==12.3.0" },
+    { name = "pillow", marker = "extra == 'vision'", specifier = "==12.3.0" },
+    { name = "pillow-heif", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')", specifier = ">=1.4.0,<2" },
+    { name = "pillow-heif", marker = "extra == 'heif'", specifier = ">=1.4.0,<2" },
     { name = "prompt-toolkit", specifier = "==3.0.52" },
     { name = "psutil", specifier = "==7.2.2" },
     { name = "ptyprocess", marker = "sys_platform != 'win32'", specifier = ">=0.7.0,<1" },
@@ -2135,11 +2154,12 @@ requires-dist = [
     { name = "uvicorn", marker = "extra == 'web'", specifier = "==0.41.0" },
     { name = "uvloop", marker = "platform_python_implementation != 'PyPy' and sys_platform != 'android' and sys_platform != 'cygwin' and sys_platform != 'win32' and extra == 'uvloop'", specifier = ">=0.15.1,<0.24" },
     { name = "vercel", marker = "extra == 'vercel'", specifier = "==0.7.2" },
-    { name = "watchfiles", specifier = ">=0.20,<2" },
+    { name = "watchfiles", marker = "(sys_platform != 'android' and 'android' not in platform_release) or (platform_machine != 'armv7l' and platform_machine != 'armv8l' and platform_machine != 'arm')", specifier = ">=0.20,<2" },
+    { name = "watchfiles", marker = "extra == 'server-speedups'", specifier = ">=0.20,<2" },
     { name = "websockets", specifier = "==15.0.1" },
     { name = "youtube-transcript-api", marker = "extra == 'youtube'", specifier = "==1.2.4" },
 ]
-provides-extras = ["uvloop", "anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "vercel", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "tts-premium", "voice", "wake", "honcho", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "otlp", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "google-chat", "youtube", "web", "all"]
+provides-extras = ["uvloop", "doc-extract", "heif", "server-speedups", "anthropic", "exa", "firecrawl", "parallel-web", "fal", "edge-tts", "modal", "daytona", "vercel", "hindsight", "dev", "messaging", "cron", "slack", "matrix", "wecom", "tts-premium", "voice", "wake", "honcho", "supermemory", "mem0", "vision", "pty", "mcp", "nemo-relay", "homeassistant", "sms", "teams", "computer-use", "acp", "mistral", "otlp", "bedrock", "vertex", "azure-identity", "termux", "termux-all", "dingtalk", "feishu", "google", "google-chat", "youtube", "web", "all"]
 
 [[package]]
 name = "hf-xet"

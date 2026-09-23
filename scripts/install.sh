@@ -744,6 +744,30 @@ check_python() {
     fi
 }
 
+is_termux_android_arm32_python() {
+    [ "$DISTRO" = "termux" ] || return 1
+    [ -n "${PYTHON_PATH:-}" ] || return 1
+    local verdict
+    verdict="$($PYTHON_PATH -c "import os, platform, sys, sysconfig; machine=(platform.machine() or '').lower(); plat=(sysconfig.get_platform() or '').lower(); multiarch=(sysconfig.get_config_var('MULTIARCH') or '').lower(); release=(platform.release() or '').lower(); prefix=os.environ.get('PREFIX','').lower(); is_android=(sys.platform == 'android' or 'android' in release or 'com.termux' in prefix or bool(os.environ.get('ANDROID_ROOT'))); arm32=(machine in {'arm','armv7l','armv8l'} or 'armeabi' in plat or 'arm-linux-androideabi' in multiarch); print('yes' if is_android and arm32 else 'no')" 2>/dev/null)"
+    [ "$verdict" = "yes" ]
+}
+
+check_termux_arm32_support_gate() {
+    if ! is_termux_android_arm32_python; then
+        return 0
+    fi
+    if [ "${HERMES_TERMUX_ARM32_EXPERIMENTAL:-}" = "1" ]; then
+        log_warn "Termux Android ARM32 detected; continuing because HERMES_TERMUX_ARM32_EXPERIMENTAL=1"
+        log_warn "This may attempt native Rust/C builds for packages without android_*/armeabi-v7a wheels."
+        return 0
+    fi
+    log_error "Termux Android ARM32 (armeabi-v7a / armv8l) is not supported by the standard installer yet."
+    log_info "Hermes is stopping before pip attempts large native builds. Current blockers include pydantic-core, jiter, PyYAML/ruamel.yaml.clib, Tornado, Pillow, httptools/watchfiles, and firecrawl-anydoc wheels for android_*/armeabi-v7a."
+    log_info "Next safe path: use the Termux ARM32 minimal plan / preflight work, or provide a reviewed Android ARM32 wheelhouse."
+    log_info "If you intentionally want to experiment anyway, rerun with: HERMES_TERMUX_ARM32_EXPERIMENTAL=1"
+    exit 1
+}
+
 # Best-effort automatic git provisioning, mirroring install.ps1's Install-Git
 # (which downloads PortableGit on Windows). git is required to clone the repo,
 # and a fresh "normie" machine with no developer tools won't have it. Returns 0
@@ -3761,6 +3785,7 @@ run_stage_body() {
             resolve_install_layout
             install_uv
             check_python
+            check_termux_arm32_support_gate
             check_git
             check_node
             check_cxx_compiler
@@ -3779,6 +3804,7 @@ run_stage_body() {
             require_install_dir
             install_uv
             check_python
+            check_termux_arm32_support_gate
             setup_venv
             ;;
         python-deps)
@@ -3787,6 +3813,7 @@ run_stage_body() {
             require_install_dir
             install_uv
             check_python
+            check_termux_arm32_support_gate
             install_deps
             ;;
         node-deps)
@@ -3904,6 +3931,7 @@ main() {
     resolve_install_layout
     install_uv
     check_python
+    check_termux_arm32_support_gate
     check_git
     check_node
     check_cxx_compiler

@@ -38,6 +38,18 @@ if len(sys.argv) >= 2 and sys.argv[1] == '--version':
 if len(sys.argv) >= 3 and sys.argv[1] == '-c':
     sys.version = f'{{VERSION}} (fake)'
     sys.version_info = VERSION_INFO
+    sys.platform = os.environ.get('FAKE_SYS_PLATFORM', sys.platform)
+    import platform as _platform
+    import sysconfig as _sysconfig
+    if os.environ.get('FAKE_PLATFORM_MACHINE'):
+        _platform.machine = lambda: os.environ['FAKE_PLATFORM_MACHINE']
+    if os.environ.get('FAKE_PLATFORM_RELEASE'):
+        _platform.release = lambda: os.environ['FAKE_PLATFORM_RELEASE']
+    if os.environ.get('FAKE_SYSCONFIG_PLATFORM'):
+        _sysconfig.get_platform = lambda: os.environ['FAKE_SYSCONFIG_PLATFORM']
+    if os.environ.get('FAKE_MULTIARCH'):
+        _orig_get_config_var = _sysconfig.get_config_var
+        _sysconfig.get_config_var = lambda name: os.environ['FAKE_MULTIARCH'] if name == 'MULTIARCH' else _orig_get_config_var(name)
     exec(sys.argv[2], {{'__name__': '__main__'}})
     raise SystemExit(0)
 
@@ -91,11 +103,13 @@ def _termux_env(tmp_path: Path, bin_dir: Path) -> dict[str, str]:
     return env
 
 
-def _run_install_prerequisites(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_install_prerequisites(tmp_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _write_termux_command_stubs(bin_dir)
     env = _termux_env(tmp_path, bin_dir)
+    if extra_env:
+        env.update(extra_env)
     bash = shutil.which("bash") or "/bin/bash"
     return subprocess.run(
         [bash, str(INSTALL_SH), "--stage", "prerequisites", "--non-interactive"],
@@ -114,11 +128,13 @@ def _copy_setup_checkout(tmp_path: Path) -> Path:
     return checkout
 
 
-def _run_setup(tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_setup(tmp_path: Path, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _write_termux_command_stubs(bin_dir)
     env = _termux_env(tmp_path, bin_dir)
+    if extra_env:
+        env.update(extra_env)
     checkout = _copy_setup_checkout(tmp_path)
     bash = shutil.which("bash") or "/bin/bash"
     return subprocess.run(
@@ -191,6 +207,75 @@ def test_install_stage_provisions_supported_python_from_tur(tmp_path: Path) -> N
     assert "Python installed from TUR: Python 3.13.7" in result.stdout
 
 
+def test_install_stage_stops_on_termux_android_arm32_without_override(tmp_path: Path) -> None:
+    """Termux ARM32 should fail before pip attempts native Rust/C builds."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_install_prerequisites(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "android",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_SYSCONFIG_PLATFORM": "android-24-armeabi_v7a",
+            "FAKE_MULTIARCH": "arm-linux-androideabi",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Termux Android ARM32" in result.stdout
+    assert "stopping before pip attempts large native builds" in result.stdout
+    assert "HERMES_TERMUX_ARM32_EXPERIMENTAL=1" in result.stdout
+
+
+def test_install_stage_allows_termux_android_arm32_with_explicit_override(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_install_prerequisites(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "android",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_SYSCONFIG_PLATFORM": "android-24-armeabi_v7a",
+            "FAKE_MULTIARCH": "arm-linux-androideabi",
+            "HERMES_TERMUX_ARM32_EXPERIMENTAL": "1",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "continuing because HERMES_TERMUX_ARM32_EXPERIMENTAL=1" in result.stdout
+
+
+def test_install_stage_stops_on_legacy_termux_linux_arm32(tmp_path: Path) -> None:
+    """Older Termux Pythons may report sys.platform='linux'; still block ARM32."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_install_prerequisites(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "linux",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_PLATFORM_RELEASE": "6.1.0-android14",
+            "FAKE_SYSCONFIG_PLATFORM": "linux-armv7l",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Termux Android ARM32" in result.stdout
+    assert "stopping before pip attempts large native builds" in result.stdout
+
+
 def test_setup_script_prefers_compatible_minor_over_unsupported_default(
     tmp_path: Path,
 ) -> None:
@@ -218,3 +303,26 @@ def test_setup_script_rejects_unsupported_default(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "Termux Python Python 3.14.6 is not supported" in result.stdout
     assert "Hermes requires Python >=3.11,<3.14" in result.stdout
+
+
+def test_setup_script_stops_on_termux_android_arm32_without_override(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_python(bin_dir, "python3.13", "3.13.13")
+    _write_fake_python(bin_dir, "python", "3.14.6")
+    _write_unsupported_explicit_pythons(bin_dir, "python3.13")
+
+    result = _run_setup(
+        tmp_path,
+        {
+            "FAKE_SYS_PLATFORM": "android",
+            "FAKE_PLATFORM_MACHINE": "armv8l",
+            "FAKE_SYSCONFIG_PLATFORM": "android-24-armeabi_v7a",
+            "FAKE_MULTIARCH": "arm-linux-androideabi",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "Termux Android ARM32" in result.stdout
+    assert "stopping before pip attempts large native builds" in result.stdout
+    assert "HERMES_TERMUX_ARM32_EXPERIMENTAL=1" in result.stdout

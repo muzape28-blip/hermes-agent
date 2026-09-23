@@ -12,6 +12,12 @@
 # uvloop is absent — no performance-critical codepath depends on it.
 # The [uvloop] optional extra is included in [all] but intentionally omitted
 # from [termux] and [termux-all].  See pyproject.toml for details.
+#
+# Termux Android ARM32 (armeabi-v7a / armv8l) is additionally gated by the
+# installer and lazy-dependency layer. PyPI does not publish android_*/armeabi-v7a
+# wheels for several Hermes native packages (pydantic-core, jiter, Pillow,
+# PyYAML/ruamel.yaml.clib, Tornado, httptools/watchfiles, firecrawl-anydoc), so
+# Hermes stops before surprise Rust/C source builds unless explicitly overridden.
 
 ipython<10
 jedi>=0.18.1,<0.20

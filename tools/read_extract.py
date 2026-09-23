@@ -136,13 +136,22 @@ def _anydoc_missing_error(path: str) -> str:
     availability caveat — a session that never touches a .doc/.odt/.epub never pays for the explanation, and
     one that does gets the full story here, with the fix.
     """
+    termux_note = ""
+    with contextlib.suppress(Exception):
+        from tools.lazy_deps import _is_android_arm32
+        if _is_android_arm32():
+            termux_note = (
+                " On Termux/Android ARM32, Hermes intentionally does not "
+                "lazy-compile firecrawl-anydoc because no android_*/armeabi-v7a "
+                "wheel is published."
+            )
     return (
         f"Cannot convert {path!r}: this format needs the optional anydoc "
         "converter, which is not installed (install blocked or first "
-        "attempt failed; retried every 5 minutes). Fix: `pip install "
-        "firecrawl-anydoc` in Hermes's environment, or convert the file "
-        "yourself via terminal (e.g. libreoffice --headless --convert-to "
-        "txt).")
+        "attempt failed; retried every 5 minutes)." + termux_note + " Fix: `pip install "
+        "firecrawl-anydoc` in Hermes's environment only when a compatible wheel "
+        "exists, or convert the file yourself via terminal (e.g. libreoffice "
+        "--headless --convert-to txt).")
 
 
 def _hosted_ocr_config() -> tuple:
